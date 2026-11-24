@@ -261,6 +261,8 @@ type RunOptions struct {
 	DoWorks bool
 	// Answerer 是答题模型；DoWorks 时必须提供。
 	Answerer *AIAnswerer
+	// Cache 是题目答案缓存；命中时跳过模型请求。
+	Cache *AnswerCache
 	// Decoder 是已经加载好的比对字体（进程级单例）；优先于 FontData / FontPath。
 	Decoder *FontDecoder
 	// FontPath 是比对用的完整中文字体；答题页没有混淆字体时可为空。
@@ -411,7 +413,7 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 				}
 				title := firstNonEmpty(w.Title, w.WorkID, w.JobID)
 				logf(false, "[%s] 发现测验：%s，开始自动作答", w.ChapterID, title)
-				res, err := c.SolveWork(ctx, w, ensureDecoder(), opt.Answerer)
+				res, err := c.SolveWork(ctx, w, ensureDecoder(), opt.Answerer, opt.Cache)
 				if err != nil {
 					logf(true, "[%s] 测验 %s 作答失败：%v", w.ChapterID, title, err)
 					emit(EvWorkDone{Chapter: w.ChapterID, Title: title, Reason: err.Error()})
@@ -430,6 +432,9 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 					detail := fmt.Sprintf("%d 题已提交", ev.Questions)
 					if res.FontChars > 0 {
 						detail = fmt.Sprintf("还原 %d 个字体字符，%s", res.FontChars, detail)
+					}
+					if res.Cached > 0 {
+						detail += fmt.Sprintf("，缓存命中 %d 题", res.Cached)
 					}
 					if res.Review != nil {
 						ev.Score, ev.Correct, ev.Wrong = res.Review.Score, res.Review.Correct, res.Review.Wrong

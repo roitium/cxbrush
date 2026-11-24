@@ -22,6 +22,7 @@ type Runner struct {
 	st       *store.Store
 	fontPath string
 	fontData []byte
+	cache    *cx.AnswerCache
 
 	mu      sync.Mutex
 	clients map[int64]*clientEntry
@@ -56,6 +57,9 @@ func NewRunner(st *store.Store, fontPath string, fontData []byte, workers int) *
 		gates:    map[int64]*userGate{},
 	}
 }
+
+// SetAnswerCache 设置题目答案缓存（整个进程共享）。
+func (r *Runner) SetAnswerCache(c *cx.AnswerCache) { r.cache = c }
 
 const maxWorkers = 32
 
@@ -323,7 +327,7 @@ func (r *Runner) run(ctx context.Context, t *store.Task, videos int) {
 		r.finish(t.ID, store.StatusFailed, err.Error())
 		return
 	}
-	opt := cx.RunOptions{Concurrency: videos, DoDocs: true, DoReads: true, DoLive: t.DoLive, DoWorks: t.DoWorks}
+	opt := cx.RunOptions{Concurrency: videos, DoDocs: true, DoReads: true, DoLive: t.DoLive, DoWorks: t.DoWorks, Cache: r.cache}
 	if t.DoWorks {
 		dec, derr := r.Decoder()
 		if derr != nil {

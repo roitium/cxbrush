@@ -17,11 +17,12 @@ type SolveResult struct {
 	Skipped    bool
 	SkipReason string
 	FontChars  int
+	Cached     int // 命中答案缓存的题目数
 }
 
 // SolveWork 抓取答题页、还原内联字体、调用模型作答，并在 ai 与页面都可用时提交。
-// dec 可以为 nil（页面没有混淆字体时不需要）。
-func (c *Client) SolveWork(ctx context.Context, w *Work, dec *FontDecoder, ai *AIAnswerer) (*SolveResult, error) {
+// dec 可以为 nil（页面没有混淆字体时不需要）；cache 命中时不会请求模型。
+func (c *Client) SolveWork(ctx context.Context, w *Work, dec *FontDecoder, ai *AIAnswerer, cache *AnswerCache) (*SolveResult, error) {
 	res := &SolveResult{Work: w}
 	if w == nil {
 		return nil, fmt.Errorf("空的测验任务")
@@ -58,12 +59,31 @@ func (c *Client) SolveWork(ctx context.Context, w *Work, dec *FontDecoder, ai *A
 		page.ApplyFont(secret)
 		res.FontChars = len(secret.Map)
 	}
-	if ai == nil {
-		return nil, fmt.Errorf("没有配置答题模型")
+	var answers map[string][]string
+	pending := page.Questions
+	if cache != nil {
+		answers, pending = cache.Lookup(page.Questions)
+		res.Cached = len(page.Questions) - len(pending)
 	}
-	answers, err := ai.Answer(ctx, page.Questions)
-	if err != nil {
-		return nil, err
+	if len(pending) > 0 {
+		if ai == nil {
+			return nil, fmt.Errorf("没有配置答题模型")
+		}
+		got, err := ai.Answer(ctx, pending)
+		if err != nil {
+			return nil, err
+		}
+		if answers == nil {
+			answers = make(map[string][]string, len(got))
+		}
+		for qid, vals := range got {
+			answers[qid] = vals
+		}
+		if cache != nil {
+			for i := range pending {
+				cache.Put(pending[i], got[pending[i].ID])
+			}
+		}
 	}
 	res.Answers = answers
 

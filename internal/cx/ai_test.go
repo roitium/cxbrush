@@ -88,14 +88,14 @@ func TestNormalizeAIAnswersUsesValue(t *testing.T) {
 
 func TestSolveWorkSkipsPassed(t *testing.T) {
 	c := New(nil)
-	res, err := c.SolveWork(context.Background(), &Work{IsPassed: true}, nil, nil)
+	res, err := c.SolveWork(context.Background(), &Work{IsPassed: true}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !res.Skipped || res.SkipReason != "已完成" {
 		t.Fatalf("passed work should be skipped: %+v", res)
 	}
-	if _, err := c.SolveWork(context.Background(), nil, nil, nil); err == nil {
+	if _, err := c.SolveWork(context.Background(), nil, nil, nil, nil); err == nil {
 		t.Fatal("nil work should error")
 	}
 }
