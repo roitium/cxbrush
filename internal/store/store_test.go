@@ -91,6 +91,42 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPrefs(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	u, err := st.CreateUser("bob", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 没设置过时是默认值。
+	p, err := st.Prefs(u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Tasks != DefaultParallelTasks || p.Videos != DefaultParallelVideos {
+		t.Fatalf("默认 Prefs = %+v", p)
+	}
+
+	if err := st.SetPrefs(u.ID, Prefs{Tasks: 3, Videos: 6}); err != nil {
+		t.Fatal(err)
+	}
+	if p, err = st.Prefs(u.ID); err != nil || p.Tasks != 3 || p.Videos != 6 {
+		t.Fatalf("Prefs = %+v %v", p, err)
+	}
+
+	// 越界的值会被夹回范围。
+	if err := st.SetPrefs(u.ID, Prefs{Tasks: 99, Videos: -1}); err != nil {
+		t.Fatal(err)
+	}
+	if p, err = st.Prefs(u.ID); err != nil || p.Tasks != MaxParallelTasks || p.Videos != DefaultParallelVideos {
+		t.Fatalf("越界 Prefs = %+v %v", p, err)
+	}
+}
+
 func TestAIConfigRoundTrip(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "data"))
 	if err != nil {

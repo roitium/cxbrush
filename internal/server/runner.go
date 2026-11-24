@@ -23,11 +23,11 @@ type Runner struct {
 	fontPath string
 	fontData []byte
 
-	mu        sync.Mutex
-	clients   map[int64]*clientEntry
-	cancels   map[int64]context.CancelFunc
-	sem       chan struct{}
-	videoConc int
+	mu      sync.Mutex
+	clients map[int64]*clientEntry
+	cancels map[int64]context.CancelFunc
+	sem     chan struct{}
+	gates   map[int64]*userGate
 
 	decOnce sync.Once
 	dec     *cx.FontDecoder
@@ -43,35 +43,85 @@ type clientEntry struct {
 	c    *cx.Client
 }
 
-// NewRunner 创建任务调度器。workers 是同时运行的任务数，videos 是单个任务内
-// 同时上报的视频数；两者都会被夹到 1..maxParallel。
-func NewRunner(st *store.Store, fontPath string, fontData []byte, workers, videos int) *Runner {
+// NewRunner 创建任务调度器。workers 是全进程同时运行任务数的硬上限，
+// 每个用户自己的并行度存在 prefs 表里，两者取交集。
+func NewRunner(st *store.Store, fontPath string, fontData []byte, workers int) *Runner {
 	return &Runner{
-		st:        st,
-		fontPath:  fontPath,
-		fontData:  fontData,
-		clients:   map[int64]*clientEntry{},
-		cancels:   map[int64]context.CancelFunc{},
-		sem:       make(chan struct{}, clampParallel(workers)),
-		videoConc: clampParallel(videos),
+		st:       st,
+		fontPath: fontPath,
+		fontData: fontData,
+		clients:  map[int64]*clientEntry{},
+		cancels:  map[int64]context.CancelFunc{},
+		sem:      make(chan struct{}, clampWorkers(workers)),
+		gates:    map[int64]*userGate{},
 	}
 }
 
-const maxParallel = 16
+const maxWorkers = 32
 
-func clampParallel(n int) int {
+func clampWorkers(n int) int {
 	if n <= 0 {
-		return 2
+		return 8
 	}
-	if n > maxParallel {
-		return maxParallel
+	if n > maxWorkers {
+		return maxWorkers
 	}
 	return n
 }
 
-// Parallelism 返回当前生效的并行度（同时任务数 / 单任务视频数）。
-func (r *Runner) Parallelism() (tasks, videos int) {
-	return cap(r.sem), r.videoConc
+// Ceiling 返回全进程允许同时运行的任务数上限。
+func (r *Runner) Ceiling() int { return cap(r.sem) }
+
+// userGate 限制单个用户同时运行的任务数；limit 可以随时调整。
+type userGate struct {
+	mu      sync.Mutex
+	running int
+	limit   int
+}
+
+func (g *userGate) setLimit(n int) {
+	g.mu.Lock()
+	g.limit = n
+	g.mu.Unlock()
+}
+
+// acquire 等到用户级槽位或 ctx 取消。轮询间隔只影响排队时的反应速度。
+func (g *userGate) acquire(ctx context.Context) bool {
+	for {
+		g.mu.Lock()
+		if g.running < g.limit {
+			g.running++
+			g.mu.Unlock()
+			return true
+		}
+		g.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+func (g *userGate) release() {
+	g.mu.Lock()
+	if g.running > 0 {
+		g.running--
+	}
+	g.mu.Unlock()
+}
+
+func (r *Runner) gateFor(userID int64, limit int) *userGate {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	g := r.gates[userID]
+	if g == nil {
+		g = &userGate{limit: limit}
+		r.gates[userID] = g
+		return g
+	}
+	g.setLimit(limit)
+	return g
 }
 
 // ClientFor 返回该用户专属的学习通客户端；Cookie 变了会自动重建。
@@ -219,23 +269,37 @@ func (r *Runner) Start(t *store.Task) error {
 	r.cancels[t.ID] = cancel
 	r.mu.Unlock()
 
+	prefs, err := r.st.Prefs(t.UserID)
+	if err != nil {
+		prefs = store.Prefs{Tasks: store.DefaultParallelTasks, Videos: store.DefaultParallelVideos}
+	}
+	gate := r.gateFor(t.UserID, prefs.Tasks)
+
 	go func() {
+		if !gate.acquire(ctx) {
+			r.finish(t.ID, store.StatusCanceled, "已取消")
+			r.drop(t.ID)
+			return
+		}
+		defer gate.release()
 		select {
 		case r.sem <- struct{}{}:
 		case <-ctx.Done():
 			r.finish(t.ID, store.StatusCanceled, "已取消")
-			r.mu.Lock()
-			delete(r.cancels, t.ID)
-			r.mu.Unlock()
+			r.drop(t.ID)
 			return
 		}
 		defer func() { <-r.sem }()
-		r.run(ctx, t)
-		r.mu.Lock()
-		delete(r.cancels, t.ID)
-		r.mu.Unlock()
+		r.run(ctx, t, prefs.Videos)
+		r.drop(t.ID)
 	}()
 	return nil
+}
+
+func (r *Runner) drop(taskID int64) {
+	r.mu.Lock()
+	delete(r.cancels, taskID)
+	r.mu.Unlock()
 }
 
 func (r *Runner) Cancel(taskID int64) bool {
@@ -253,13 +317,13 @@ func (r *Runner) finish(taskID int64, status, message string) {
 	_ = r.st.AddEvent(taskID, "status", map[string]any{"status": status, "message": message})
 }
 
-func (r *Runner) run(ctx context.Context, t *store.Task) {
+func (r *Runner) run(ctx context.Context, t *store.Task, videos int) {
 	c, err := r.ClientFor(t.UserID)
 	if err != nil {
 		r.finish(t.ID, store.StatusFailed, err.Error())
 		return
 	}
-	opt := cx.RunOptions{Concurrency: r.videoConc, DoDocs: true, DoWorks: t.DoWorks}
+	opt := cx.RunOptions{Concurrency: videos, DoDocs: true, DoWorks: t.DoWorks}
 	if t.DoWorks {
 		dec, derr := r.Decoder()
 		if derr != nil {

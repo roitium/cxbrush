@@ -35,8 +35,7 @@ type Options struct {
 	FontPath  string
 	FontData  []byte
 	AllowOpen bool // 允许任何人注册（否则只在没有任何用户时允许注册第一个）
-	Workers   int  // 同时运行的任务数
-	Videos    int  // 单个任务内同时上报的视频数
+	Workers   int  // 全进程同时运行任务数的硬上限
 }
 
 type Server struct {
@@ -49,7 +48,7 @@ type Server struct {
 
 func New(st *store.Store, opts Options) *Server {
 	s := &Server{st: st, key: st.Key(), opt: opts, mux: http.NewServeMux()}
-	s.runner = NewRunner(st, opts.FontPath, opts.FontData, opts.Workers, opts.Videos)
+	s.runner = NewRunner(st, opts.FontPath, opts.FontData, opts.Workers)
 	s.routes()
 	return s
 }
@@ -106,6 +105,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/settings/ai", s.auth(s.handleGetAI))
 	s.mux.HandleFunc("PUT /api/settings/ai", s.auth(s.handleSetAI))
 	s.mux.HandleFunc("POST /api/settings/ai/test", s.auth(s.handleTestAI))
+	s.mux.HandleFunc("GET /api/settings/parallel", s.auth(s.handleGetParallel))
+	s.mux.HandleFunc("PUT /api/settings/parallel", s.auth(s.handleSetParallel))
 	s.mux.HandleFunc("GET /api/courses", s.auth(s.handleCourses))
 	s.mux.HandleFunc("GET /api/chapters", s.auth(s.handleChapters))
 
@@ -247,10 +248,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	if a, err := s.runner.Answerer(); err == nil && a != nil {
 		hasAI, aiModel = true, a.Model
 	}
-	workers, videos := s.runner.Parallelism()
+	prefs, _ := s.st.Prefs(u.ID)
 	writeJSON(w, map[string]any{
 		"user": u, "hasCookie": cookie != "", "hasAI": hasAI, "aiModel": aiModel,
-		"parallel": map[string]int{"tasks": workers, "videos": videos},
+		"parallel": map[string]int{
+			"tasks": prefs.Tasks, "videos": prefs.Videos, "ceiling": s.runner.Ceiling(),
+		},
 	})
 }
 
@@ -429,6 +432,46 @@ func (s *Server) handleTestAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "model": a.Model, "latencyMs": took.Milliseconds()})
+}
+
+// ---------- 并行度 ----------
+
+func (s *Server) handleGetParallel(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	p, err := s.st.Prefs(u.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{
+		"tasks": p.Tasks, "videos": p.Videos,
+		"maxTasks": store.MaxParallelTasks, "maxVideos": store.MaxParallelVideos,
+		"ceiling": s.runner.Ceiling(),
+	})
+}
+
+func (s *Server) handleSetParallel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Tasks  int `json:"tasks"`
+		Videos int `json:"videos"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Tasks < 1 || req.Tasks > store.MaxParallelTasks {
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("同时任务数需在 1-%d 之间", store.MaxParallelTasks))
+		return
+	}
+	if req.Videos < 1 || req.Videos > store.MaxParallelVideos {
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("视频并发需在 1-%d 之间", store.MaxParallelVideos))
+		return
+	}
+	u := userFrom(r)
+	if err := s.st.SetPrefs(u.ID, store.Prefs{Tasks: req.Tasks, Videos: req.Videos}); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "tasks": req.Tasks, "videos": req.Videos})
 }
 
 func maskKey(k string) string {

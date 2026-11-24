@@ -2,6 +2,7 @@
   import { app, refreshAfterAccountChange } from '../lib/state.svelte.js'
   import AccountCard from '../lib/AccountCard.svelte'
   import SettingsCard from '../lib/SettingsCard.svelte'
+  import ParallelCard from '../lib/ParallelCard.svelte'
 
   function onSaved() {
     refreshAfterAccountChange()
@@ -18,6 +19,8 @@
     <AccountCard hasCookie={app.hasCookie} onSaved={onSaved} />
     <SettingsCard onSaved={onSaved} />
   </div>
+
+  <ParallelCard onSaved={onSaved} />
 
   <section class="card about">
     <div class="card-head"><h2>关于</h2></div>

@@ -1,23 +1,46 @@
 package server
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+)
 
-func TestClampParallel(t *testing.T) {
-	cases := map[int]int{-5: 2, 0: 2, 1: 1, 4: 4, 16: 16, 99: 16}
+func TestClampWorkers(t *testing.T) {
+	cases := map[int]int{-5: 8, 0: 8, 1: 1, 8: 8, 32: 32, 99: 32}
 	for in, want := range cases {
-		if got := clampParallel(in); got != want {
-			t.Errorf("clampParallel(%d) = %d, want %d", in, got, want)
+		if got := clampWorkers(in); got != want {
+			t.Errorf("clampWorkers(%d) = %d, want %d", in, got, want)
 		}
 	}
 }
 
-func TestNewRunnerParallelism(t *testing.T) {
-	r := NewRunner(nil, "", nil, 3, 5)
-	if tasks, videos := r.Parallelism(); tasks != 3 || videos != 5 {
-		t.Fatalf("Parallelism() = %d,%d, want 3,5", tasks, videos)
+func TestNewRunnerCeiling(t *testing.T) {
+	if got := NewRunner(nil, "", nil, 3).Ceiling(); got != 3 {
+		t.Fatalf("Ceiling() = %d, want 3", got)
 	}
-	r = NewRunner(nil, "", nil, 0, 0)
-	if tasks, videos := r.Parallelism(); tasks != 2 || videos != 2 {
-		t.Fatalf("默认 Parallelism() = %d,%d, want 2,2", tasks, videos)
+	if got := NewRunner(nil, "", nil, 0).Ceiling(); got != 8 {
+		t.Fatalf("默认 Ceiling() = %d, want 8", got)
+	}
+}
+
+func TestUserGate(t *testing.T) {
+	g := &userGate{limit: 2}
+	ctx := context.Background()
+	if !g.acquire(ctx) || !g.acquire(ctx) {
+		t.Fatal("前两个槽位应该拿到")
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 120*time.Millisecond)
+	defer cancel()
+	if g.acquire(waitCtx) {
+		t.Fatal("超过 limit 不应拿到槽位")
+	}
+	g.release()
+	if !g.acquire(ctx) {
+		t.Fatal("释放后应能拿到槽位")
+	}
+	g.setLimit(3)
+	if !g.acquire(ctx) {
+		t.Fatal("提高 limit 后应能拿到槽位")
 	}
 }

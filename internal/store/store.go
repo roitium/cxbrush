@@ -116,6 +116,12 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS prefs (
+  user_id    INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  tasks      INTEGER NOT NULL,
+  videos     INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `
 
 func (s *Store) migrate() error {
@@ -278,6 +284,59 @@ func (s *Store) SetAIConfig(cfg AIConfig) error {
 // ClearAIConfig 删除自定义配置，回退到环境变量。
 func (s *Store) ClearAIConfig() error {
 	_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, aiConfigKey)
+	return err
+}
+
+// ---------- 每个用户的运行偏好 ----------
+
+const (
+	DefaultParallelTasks  = 2
+	DefaultParallelVideos = 2
+	MaxParallelTasks      = 4
+	MaxParallelVideos     = 8
+)
+
+// Prefs 是用户自己的并行度：同时几个任务、每个任务内几路视频。
+type Prefs struct {
+	Tasks  int `json:"tasks"`
+	Videos int `json:"videos"`
+}
+
+// Normalized 把缺失或越界的值夹回合理范围，读库时也能兜底。
+func (p Prefs) Normalized() Prefs {
+	if p.Tasks < 1 {
+		p.Tasks = DefaultParallelTasks
+	} else if p.Tasks > MaxParallelTasks {
+		p.Tasks = MaxParallelTasks
+	}
+	if p.Videos < 1 {
+		p.Videos = DefaultParallelVideos
+	} else if p.Videos > MaxParallelVideos {
+		p.Videos = MaxParallelVideos
+	}
+	return p
+}
+
+// Prefs 读取用户的并行度，没设置过时返回默认值。
+func (s *Store) Prefs(userID int64) (Prefs, error) {
+	def := Prefs{Tasks: DefaultParallelTasks, Videos: DefaultParallelVideos}
+	var tasks, videos int
+	err := s.db.QueryRow(`SELECT tasks, videos FROM prefs WHERE user_id = ?`, userID).Scan(&tasks, &videos)
+	if err == sql.ErrNoRows {
+		return def, nil
+	}
+	if err != nil {
+		return def, err
+	}
+	return Prefs{Tasks: tasks, Videos: videos}.Normalized(), nil
+}
+
+// SetPrefs 保存用户的并行度。
+func (s *Store) SetPrefs(userID int64, p Prefs) error {
+	p = p.Normalized()
+	_, err := s.db.Exec(`INSERT INTO prefs(user_id, tasks, videos, updated_at) VALUES(?,?,?,?)
+		ON CONFLICT(user_id) DO UPDATE SET tasks=excluded.tasks, videos=excluded.videos, updated_at=excluded.updated_at`,
+		userID, p.Tasks, p.Videos, time.Now().Unix())
 	return err
 }
 

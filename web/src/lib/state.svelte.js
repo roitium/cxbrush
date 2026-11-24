@@ -6,7 +6,7 @@ export const app = $state({
   hasCookie: false,
   hasAI: false,
   aiModel: '',
-  parallel: { tasks: 0, videos: 0 },
+  parallel: { tasks: 2, videos: 2, ceiling: 0 },
   courses: [],
   coursesError: '',
   coursesLoading: false,
@@ -30,12 +30,12 @@ export async function loadMe() {
     app.hasCookie = !!r.hasCookie
     app.hasAI = !!r.hasAI
     app.aiModel = r.aiModel || ''
-    app.parallel = r.parallel || { tasks: 0, videos: 0 }
+    app.parallel = r.parallel || { tasks: 2, videos: 2, ceiling: 0 }
   } catch {
     app.me = null
     app.hasCookie = false
     app.hasAI = false
-    app.parallel = { tasks: 0, videos: 0 }
+    app.parallel = { tasks: 2, videos: 2, ceiling: 0 }
   }
 }
 
