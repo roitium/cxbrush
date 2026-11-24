@@ -1,138 +1,63 @@
 <script>
   import { onMount } from 'svelte'
-  import { api } from './lib/api.js'
+  import { route } from './lib/router.svelte.js'
+  import { app, bootstrap, loadTasks } from './lib/state.svelte.js'
+  import TopBar from './lib/TopBar.svelte'
+  import Toast from './lib/Toast.svelte'
   import Login from './lib/Login.svelte'
-  import AccountCard from './lib/AccountCard.svelte'
-  import SettingsCard from './lib/SettingsCard.svelte'
-  import CoursePicker from './lib/CoursePicker.svelte'
-  import TaskList from './lib/TaskList.svelte'
-  import RunPanel from './lib/RunPanel.svelte'
+  import Overview from './pages/Overview.svelte'
+  import Tasks from './pages/Tasks.svelte'
+  import TaskDetail from './pages/TaskDetail.svelte'
+  import Settings from './pages/Settings.svelte'
 
-  let me = $state(null)
-  let hasCookie = $state(false)
-  let hasAI = $state(false)
-  let courses = $state([])
-  let tasks = $state([])
-  let activeId = $state(0)
-  let booted = $state(false)
-  let courseError = $state('')
+  onMount(bootstrap)
 
-  async function loadMe() {
-    try {
-      const r = await api('/api/me')
-      me = r.user
-      hasCookie = r.hasCookie
-      hasAI = !!r.hasAI
-      if (hasCookie) loadCourses()
-      loadTasks()
-    } catch {
-      me = null
-    } finally {
-      booted = true
-    }
-  }
-
-  async function loadCourses() {
-    try {
-      const r = await api('/api/courses')
-      courses = r.courses || []
-      courseError = ''
-    } catch (e) {
-      courses = []
-      courseError = e.message
-    }
-  }
-
-  async function loadTasks() {
-    try {
-      const r = await api('/api/tasks')
-      tasks = r.tasks || []
-    } catch {}
-  }
-
-  async function start(course, chapters, doWorks) {
-    const r = await api('/api/tasks', {
-      method: 'POST',
-      body: JSON.stringify({
-        courseId: course.courseId,
-        classId: course.classId,
-        cpi: course.cpi,
-        courseName: course.name,
-        chapters: chapters.map((c) => ({ id: c.id, title: c.title })),
-        doWorks,
-      }),
-    })
-    await loadTasks()
-    activeId = r.task.id
-  }
-
-  async function retry(id) {
-    const r = await api(`/api/tasks/${id}/retry`, { method: 'POST' })
-    await loadTasks()
-    activeId = r.task.id
-  }
-
-  async function logout() {
-    await api('/api/logout', { method: 'POST' })
-    location.reload()
-  }
-
-  function onCookieSaved() {
-    hasCookie = true
-    loadCourses()
-  }
-
-  onMount(loadMe)
+  $effect(() => {
+    if (!app.me) return
+    const timer = setInterval(loadTasks, 8000)
+    return () => clearInterval(timer)
+  })
 </script>
 
-{#if !booted}
-  <p class="hint center">加载中…</p>
-{:else if !me}
-  <Login onDone={loadMe} />
+{#if !app.booted}
+  <div class="boot">
+    <span class="logo">刷</span>
+    <span class="hint">正在加载…</span>
+  </div>
+{:else if !app.me}
+  <Login onDone={bootstrap} />
 {:else}
-  <header>
-    <strong>cxbrush</strong>
-    <span class="sp"></span>
-    <span class="hint">{me.username}</span>
-    <button class="ghost" onclick={logout}>退出</button>
-  </header>
-
+  <TopBar />
   <main>
-    <div class="col">
-      <AccountCard {hasCookie} onSaved={onCookieSaved} />
-      <SettingsCard onSaved={loadMe} />
-      {#if courseError}
-        <div class="card"><p class="err">课程列表：{courseError}</p></div>
-      {/if}
-      {#if courses.length}
-        <CoursePicker {courses} {hasAI} onStart={start} />
-      {/if}
-      <TaskList {tasks} {activeId} onSelect={(id) => (activeId = id)} onRetry={retry} />
-    </div>
-    <div class="col">
-      <RunPanel taskId={activeId} onDone={loadTasks} />
-    </div>
+    {#if route.name === 'overview'}
+      <Overview />
+    {:else if route.name === 'tasks'}
+      <Tasks />
+    {:else if route.name === 'task'}
+      <TaskDetail id={route.id} />
+    {:else}
+      <Settings />
+    {/if}
   </main>
+  <Toast />
 {/if}
 
 <style>
-  header {
-    display: flex; align-items: center; gap: 12px;
-    padding: 12px 18px; border-bottom: 1px solid var(--line);
-    position: sticky; top: 0; background: rgba(15,17,21,.92);
-    backdrop-filter: blur(8px); z-index: 5;
+  .boot {
+    min-height: 80vh;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: 12px;
   }
-  header strong { font-size: 15px; letter-spacing: .3px; }
-  .sp { flex: 1; }
-  main {
-    max-width: 1240px; margin: 0 auto; padding: 18px;
-    display: grid; grid-template-columns: 420px minmax(0, 1fr); gap: 16px;
-    align-items: start;
+  .logo {
+    width: 34px; height: 34px;
+    display: grid; place-items: center;
+    border-radius: 10px;
+    font-size: 15px; font-weight: 700;
+    color: #fff;
+    background: linear-gradient(145deg, #6f9bff, #3f6fe0);
+    animation: bob 1.6s ease-in-out infinite;
   }
-  .col { display: grid; gap: 16px; min-width: 0; }
-  .center { text-align: center; margin-top: 30vh; }
-  p { margin: 0; }
-  @media (max-width: 900px) {
-    main { grid-template-columns: 1fr; }
-  }
+  @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
 </style>

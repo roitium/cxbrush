@@ -1,7 +1,9 @@
 <script>
   import { api } from './api.js'
+  import TriCheck from './TriCheck.svelte'
 
   let { courses = [], hasAI = true, onStart } = $props()
+
   let current = $state(0)
   let chapters = $state([])
   let selected = $state(new Set())
@@ -11,11 +13,30 @@
   let starting = $state(false)
   let manual = $state(false)
   let picked = $state(false)
+  let nonce = $state(0)
 
   let course = $derived(courses[current] ?? null)
   let chosen = $derived(chapters.filter((c) => selected.has(c.id)))
 
-  // 第一次加载时，优先回到上次用过的课程。
+  let groups = $derived.by(() => {
+    const m = new Map()
+    for (const ch of chapters) {
+      const key = ch.section || '其他章节'
+      if (!m.has(key)) m.set(key, [])
+      m.get(key).push(ch)
+    }
+    return [...m].map(([name, items]) => ({
+      name,
+      items,
+      selected: items.filter((c) => selected.has(c.id)).length,
+      pending: items.reduce((n, c) => n + (c.pending > 0 ? c.pending : 0), 0),
+    }))
+  })
+
+  let pendingTotal = $derived(chapters.reduce((n, c) => n + (c.pending > 0 ? c.pending : 0), 0))
+  let allSelected = $derived(chapters.length > 0 && chosen.length === chapters.length)
+
+  // 首次拿到课程时，回到上次用过的课程。
   $effect(() => {
     if (picked || !courses.length) return
     picked = true
@@ -25,8 +46,12 @@
   })
 
   $effect(() => {
+    void nonce
     const c = course
-    if (!c) return
+    if (!c) {
+      chapters = []
+      return
+    }
     let alive = true
     loading = true
     error = ''
@@ -58,12 +83,24 @@
     selected = next
   }
 
+  function toggleGroup(g) {
+    const next = new Set(selected)
+    const on = g.selected < g.items.length
+    for (const c of g.items) on ? next.add(c.id) : next.delete(c.id)
+    selected = next
+  }
+
   function all(on) {
     selected = on ? new Set(chapters.map((c) => c.id)) : new Set()
   }
 
+  function selectPending() {
+    const todo = chapters.filter((c) => c.pending !== 0)
+    selected = new Set((todo.length ? todo : chapters).map((c) => c.id))
+  }
+
   async function start() {
-    if (!course || !chosen.length) return
+    if (!course || !chosen.length || starting) return
     starting = true
     error = ''
     try {
@@ -76,69 +113,172 @@
   }
 </script>
 
-<div class="card">
-  <h2>开始刷课</h2>
-  <div class="grid">
-    <div>
-      <span class="lbl">课程</span>
+<div class="picker">
+  <div class="side">
+    <label class="field">
+      <span>课程</span>
       <select bind:value={current} onchange={() => (manual = true)}>
-        {#each courses as c, i}
-          <option value={i}>{c.name}</option>
+        {#each courses as c, i (c.courseId)}
+          <option value={i}>{c.name}{c.teacher ? ` · ${c.teacher}` : ''}</option>
         {/each}
       </select>
-    </div>
-    <div>
-      <span class="lbl">选项</span>
-      <label class="check"><input type="checkbox" bind:checked={doWorks} /> 自动做题（章节测验）</label>
-      {#if doWorks && !hasAI}
-        <p class="hint err">还没有配置答题模型，自动做题会失败。</p>
-      {/if}
-    </div>
-  </div>
+    </label>
 
-  <div class="row tools">
-    <button class="ghost" onclick={() => all(true)}>全选</button>
-    <button class="ghost" onclick={() => all(false)}>全不选</button>
-    <span class="hint">已选 {chosen.length} / {chapters.length} 个章节</span>
-    {#if loading}<span class="hint">加载中…</span>{/if}
-  </div>
+    <label class="switch" class:off={!doWorks}>
+      <input type="checkbox" bind:checked={doWorks} />
+      <span>
+        <b>自动做章节测验</b>
+        <small>{doWorks ? (hasAI ? 'AI 作答并提交' : '未配置模型，会跳过') : '只刷视频和文档'}</small>
+      </span>
+    </label>
 
-  {#if error}
-    <p class="err">{error}</p>
-  {/if}
-
-  <div class="list">
-    {#each chapters as ch (ch.id)}
-      <label class="ch">
-        <input type="checkbox" checked={selected.has(ch.id)} onchange={() => toggle(ch.id)} />
-        <span>
-          <b>{ch.section ? ch.section + ' / ' : ''}{ch.title}</b>
-          <small>ID {ch.id}{ch.pending > 0 ? ` · 待完成 ${ch.pending}` : ''}</small>
-        </span>
-      </label>
-    {/each}
-    {#if !chapters.length && !loading && !error}
-      <p class="hint pad">没有章节</p>
+    {#if doWorks && !hasAI}
+      <p class="warnline">还没有配置答题模型，勾选的测验会被跳过。<a href="#/settings">去配置</a></p>
     {/if}
+
+    <div class="summary">
+      <div>
+        <span class="label">已选章节</span>
+        <b class="num">{chosen.length}<i>/{chapters.length}</i></b>
+      </div>
+      <div>
+        <span class="label">待完成任务点</span>
+        <b class="num">{pendingTotal}</b>
+      </div>
+    </div>
+
+    <div class="quick">
+      <button class="btn sm" onclick={selectPending} disabled={!chapters.length}>只选未完成</button>
+      <button class="btn sm ghost" onclick={() => all(false)} disabled={!chapters.length}>清空</button>
+    </div>
+
+    <button class="btn primary start" disabled={starting || !chosen.length} onclick={start}>
+      {starting ? '正在创建…' : `开始任务${chosen.length ? `（${chosen.length} 章）` : ''}`}
+    </button>
+    <p class="hint">
+      {#if course}将按顺序完成所选章节，已完成的会自动跳过。{:else}选择一门课程{/if}
+    </p>
   </div>
 
-  <div class="row" style="margin-top:12px">
-    <button class="primary" disabled={starting || !chosen.length} onclick={start}>开始</button>
+  <div class="chapters">
+    <div class="chead">
+      <TriCheck checked={allSelected} indeterminate={chosen.length > 0 && !allSelected} onchange={() => all(!allSelected)} />
+      <b>章节</b>
+      <span class="sp"></span>
+      {#if pendingTotal > 0}<span class="hint num">待完成 {pendingTotal}</span>{/if}
+    </div>
+
+    <div class="list">
+    {#if loading}
+      {#each { length: 5 } as _, i}
+        <div class="skeleton sk-row" style="opacity:{1 - i * 0.14}"></div>
+      {/each}
+    {:else if error}
+      <div class="empty">
+        <span class="ico">⚠</span>
+        <span>{error}</span>
+        <button class="btn sm" onclick={() => nonce++}>重试</button>
+      </div>
+    {:else if !chapters.length}
+      <div class="empty"><span class="ico">□</span><span>这门课没有可用的章节</span></div>
+    {:else}
+      {#each groups as g (g.name)}
+        <div class="group">
+          <div class="ghead">
+            <TriCheck
+              checked={g.selected === g.items.length && g.items.length > 0}
+              indeterminate={g.selected > 0 && g.selected < g.items.length}
+              onchange={() => toggleGroup(g)}
+            />
+            <span class="gname truncate">{g.name}</span>
+            <span class="gcount num">{g.selected}/{g.items.length}</span>
+            {#if g.pending}<span class="gpending num">待完成 {g.pending}</span>{/if}
+          </div>
+          {#each g.items as ch (ch.id)}
+            <label class="ch">
+              <input type="checkbox" checked={selected.has(ch.id)} onchange={() => toggle(ch.id)} />
+              <span class="chtitle truncate">{ch.title}</span>
+              {#if ch.pending > 0}
+                <span class="tag num">{ch.pending}</span>
+              {:else if ch.pending === 0}
+                <span class="tag done">✓</span>
+              {/if}
+            </label>
+          {/each}
+        </div>
+      {/each}
+    {/if}
+    </div>
   </div>
 </div>
 
 <style>
-  .lbl { display: block; font-size: 12px; color: var(--dim); margin-bottom: 6px; }
-  .check { display: flex; gap: 8px; align-items: center; color: var(--fg); margin: 0; padding: 8px 0; }
-  .check input { width: auto; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .tools { margin-top: 12px; }
-  .list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; margin-top: 10px; }
-  .ch { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-bottom: 1px solid var(--line); margin: 0; color: var(--fg); font-size: 14px; cursor: pointer; }
-  .ch:last-child { border-bottom: 0; }
-  .ch input { width: auto; margin-top: 3px; }
-  .ch b { font-weight: 500; }
-  .ch small { display: block; color: var(--dim); font-size: 12px; }
-  .pad { padding: 10px; margin: 0; }
-  p { margin: 10px 0 0; }
+  .picker {
+    display: grid;
+    grid-template-columns: 268px minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+  }
+  .side { display: grid; gap: 12px; }
+  .switch {
+    display: flex; align-items: center; gap: 9px;
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    cursor: pointer;
+    background: var(--bg-soft);
+  }
+  .switch span { display: grid; line-height: 1.35; }
+  .switch b { font-size: 12.5px; font-weight: 550; }
+  .switch small { color: var(--dim-2); font-size: 11px; }
+  .switch.off b { color: var(--dim); }
+  .warnline { font-size: 12px; color: var(--warn); }
+  .summary { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .summary > div {
+    display: grid; gap: 1px;
+    padding: 9px 11px;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    background: rgba(10, 12, 16, .35);
+  }
+  .summary b { font-size: 18px; font-weight: 600; line-height: 1.2; }
+  .summary b i { font-style: normal; font-size: 11px; color: var(--dim-2); }
+  .quick { display: flex; gap: 6px; }
+  .quick .btn { flex: 1; }
+  .start { width: 100%; padding: 10px 14px; }
+  .chapters { min-width: 0; display: grid; gap: 8px; }
+  .chead { display: flex; align-items: center; gap: 9px; padding: 0 2px; }
+  .chead b { font-size: 12px; color: var(--fg-2); }
+  .list {
+    max-height: 372px;
+    overflow: auto;
+    border: 1px solid var(--line-soft);
+    border-radius: 11px;
+    background: rgba(10, 12, 16, .35);
+  }
+  .sk-row { height: 34px; margin: 8px 10px; }
+  .group + .group { border-top: 1px solid var(--line-soft); }
+  .ghead {
+    position: sticky; top: 0;
+    display: flex; align-items: center; gap: 9px;
+    padding: 8px 12px;
+    background: #12161d;
+    z-index: 1;
+  }
+  .gname { font-size: 12px; font-weight: 600; letter-spacing: .01em; color: var(--fg-2); flex: 1; }
+  .gcount { font-size: 11px; color: var(--dim-2); }
+  .gpending { font-size: 10.5px; color: var(--warn); border: 1px solid var(--warn-soft); background: rgba(224, 166, 60, .07); padding: 0 6px; border-radius: 999px; }
+  .ch {
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 12px 7px 34px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .ch:hover { background: #171c25; }
+  .chtitle { flex: 1; color: var(--fg-2); }
+  .tag { font-size: 10.5px; color: var(--dim); min-width: 20px; text-align: right; }
+  .tag.done { color: #3f8f5c; }
+  @media (max-width: 860px) {
+    .picker { grid-template-columns: 1fr; }
+  }
 </style>

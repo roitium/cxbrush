@@ -3,7 +3,7 @@
 
   let { hasCookie = false, onSaved } = $props()
   let value = $state('')
-  let msg = $state(hasCookie ? '已保存，可重新粘贴覆盖' : '尚未配置')
+  let msg = $state('')
   let cls = $state('hint')
   let busy = $state(false)
 
@@ -27,15 +27,17 @@
   }
 </script>
 
-<div class="card">
-  <h2>学习通 Cookie</h2>
-  <textarea bind:value placeholder="从浏览器复制 Cookie 请求头，例如：_uid=...; fid=...; ..."></textarea>
+<div class="cookie">
+  <p class="hint">从浏览器开发者工具复制 Cookie 请求头，整段粘贴即可。</p>
+  <textarea bind:value placeholder="_uid=...; fid=...; _d=...; UID=...; vc3=..." spellcheck="false"></textarea>
   <div class="row">
-    <button disabled={busy} onclick={save}>保存并验证</button>
-    <span class={cls}>{msg}</span>
+    <button class="btn sm" disabled={busy || !value.trim()} onclick={save}>{busy ? '校验中…' : '保存并验证'}</button>
+    <span class={cls}>{msg || (hasCookie ? '当前已有保存的 Cookie，重新粘贴会覆盖。' : '')}</span>
   </div>
 </div>
 
 <style>
-  textarea { min-height: 84px; margin-bottom: 12px; }
+  .cookie { display: grid; gap: 10px; }
+  textarea { min-height: 96px; }
+  .row { align-items: center; }
 </style>
