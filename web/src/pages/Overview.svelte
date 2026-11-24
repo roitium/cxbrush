@@ -84,7 +84,7 @@
     </div>
   {:else if !app.hasAI}
     <div class="banner">
-      <span>还没有配置答题模型。视频和文档会正常完成，章节测验会被跳过。</span>
+      <span>还没有配置答题模型。视频、文档和阅读会正常完成，章节测验会被跳过。</span>
       <span class="sp"></span>
       <a class="btn sm" href="#/settings">去配置</a>
     </div>

@@ -18,6 +18,7 @@ const (
 	videoReferer    = studyBase + "/ananas/modules/video/index.html"
 	audioReferer    = studyBase + "/ananas/modules/audio/index.html"
 	documentReferer = studyBase + "/ananas/modules/pdf/index.html"
+	readReferer     = studyBase + "/ananas/modules/read/indexV2.html"
 )
 
 var (
@@ -121,9 +122,24 @@ func (d *Document) Completable() bool {
 	return d.IsJob && !d.IsPassed && d.JobID != "" && d.JToken != ""
 }
 
+// Read 是 cards 里的一个「阅读」任务点（专题阅读 insertreadV2）。
+type Read struct {
+	CourseID, ClassID int64
+	ChapterID         string
+	JobID, JToken     string
+	MicroTopicID      string
+	Name              string
+	IsJob, IsPassed   bool
+}
+
+func (r *Read) Completable() bool {
+	return r.IsJob && !r.IsPassed && r.JobID != "" && r.JToken != ""
+}
+
 type ChapterContent struct {
 	Videos []*Video
 	Docs   []*Document
+	Reads  []*Read
 	Works  []*Work
 	// Others 为直播等本 POC 不处理的任务点数量。
 	Others int
@@ -315,7 +331,7 @@ func (c *Client) ChapterContent(ctx context.Context, course *Course, ch *Chapter
 	}
 
 	content := &ChapterContent{}
-	seenVideo, seenDoc, seenWork := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	seenVideo, seenDoc, seenRead, seenWork := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	var lastErr error
 	okTabs := 0
 	for num := 0; num < cardCount; num++ {
@@ -346,6 +362,12 @@ func (c *Client) ChapterContent(ctx context.Context, course *Course, ch *Chapter
 			if !seenDoc[d.JobID] {
 				seenDoc[d.JobID] = true
 				content.Docs = append(content.Docs, d)
+			}
+		}
+		for _, r := range tab.Reads {
+			if !seenRead[r.JobID] {
+				seenRead[r.JobID] = true
+				content.Reads = append(content.Reads, r)
 			}
 		}
 		for _, w := range tab.Works {
@@ -474,6 +496,20 @@ func parseCards(html string, course *Course, chapterID string) *ChapterContent {
 				CourseID: course.CourseID, ClassID: course.ClassID, ChapterID: chapterID,
 				JobID: jobID, JToken: strv(item["jtoken"]), Name: strings.TrimSpace(name),
 				IsJob: isJob, IsPassed: done,
+			})
+		case typ == "read" || module == "insertreadv2":
+			// readJobV2：有 jobid 但 job 缺失或为 false，表示已完成。
+			done := passed
+			if !hasPassed {
+				done = jobID != "" && !jobFlag
+			}
+			name := firstNonEmpty(strv(prop["title"]), strv(prop["name"]), "阅读任务点")
+			out.Reads = append(out.Reads, &Read{
+				CourseID: course.CourseID, ClassID: course.ClassID, ChapterID: chapterID,
+				JobID: jobID, JToken: strv(item["jtoken"]),
+				MicroTopicID: strv(item["microTopicId"]),
+				Name:         strings.TrimSpace(name),
+				IsJob:        isJob, IsPassed: done,
 			})
 		case typ == "workid" || module == "work":
 			workID := strv(prop["workid"])

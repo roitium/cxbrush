@@ -128,7 +128,7 @@
       <input type="checkbox" bind:checked={doWorks} />
       <span>
         <b>自动做章节测验</b>
-        <small>{doWorks ? (hasAI ? 'AI 作答并提交' : '未配置模型，会跳过') : '只刷视频和文档'}</small>
+        <small>{doWorks ? (hasAI ? 'AI 作答并提交' : '未配置模型，会跳过') : '只刷视频、文档和阅读'}</small>
       </span>
     </label>
 

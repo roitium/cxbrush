@@ -163,6 +163,39 @@ func (c *Client) CompleteDocument(ctx context.Context, d *Document) (bool, error
 	return strings.Contains(body, `"status":true`) || strings.Contains(body, "ok"), nil
 }
 
+// CompleteRead 完成一个专题阅读任务点（insertreadV2）。
+// 和文档任务点一样，服务端只认 jobid + jtoken，不需要真的打开专题页。
+func (c *Client) CompleteRead(ctx context.Context, r *Read) (bool, error) {
+	q := url.Values{}
+	q.Set("jobid", r.JobID)
+	q.Set("knowledgeid", r.ChapterID)
+	q.Set("courseid", strconv.FormatInt(r.CourseID, 10))
+	q.Set("clazzid", strconv.FormatInt(r.ClassID, 10))
+	q.Set("jtoken", r.JToken)
+	q.Set("checkMicroTopic", "true")
+	q.Set("microTopicId", r.MicroTopicID)
+	q.Set("courseEngineInfo", "false")
+	q.Set("_dc", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	data, code, err := c.getAuth(ctx, studyBase+"/mooc-ans/job/readv2?"+q.Encode(),
+		map[string]string{"Referer": readReferer, "X-Requested-With": "XMLHttpRequest"})
+	if err != nil {
+		return false, err
+	}
+	if code/100 != 2 {
+		return false, fmt.Errorf("HTTP %d", code)
+	}
+	if root, err := decodeJSON(data); err == nil {
+		ok, _ := boolv(root["status"])
+		if !ok {
+			if msg := strv(root["msg"]); msg != "" {
+				return false, errors.New(msg)
+			}
+		}
+		return ok, nil
+	}
+	return strings.Contains(string(data), `"status":true`), nil
+}
+
 // ---------- 调度 ----------
 
 type Event any
@@ -177,7 +210,7 @@ type EvScan struct {
 }
 
 type EvQueued struct {
-	Videos, Docs, Skipped, Works int
+	Videos, Docs, Reads, Skipped, Works int
 }
 
 type EvProgress struct {
@@ -200,8 +233,8 @@ type EvTaskDone struct {
 }
 
 type EvFinished struct {
-	Passed, Failed, Docs int
-	Works                int
+	Passed, Failed, Docs, Reads int
+	Works                       int
 }
 
 // EvWorkDone 是一个章节测验的作答结果。
@@ -219,6 +252,8 @@ type EvWorkDone struct {
 type RunOptions struct {
 	Concurrency int
 	DoDocs      bool
+	// DoReads 打开后，扫描到的专题阅读任务点会自动完成。
+	DoReads bool
 	// DoWorks 打开后，扫描到的章节测验会自动抓题、还原字体、调用模型作答并提交。
 	DoWorks bool
 	// Answerer 是答题模型；DoWorks 时必须提供。
@@ -248,7 +283,7 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 
 	var queue []*Video
 	var workQueue []*Work
-	skipped, docsDone := 0, 0
+	skipped, docsDone, readsDone := 0, 0, 0
 	for i, content := range contents {
 		ch := chapters[i]
 		if errs[i] != nil {
@@ -289,6 +324,27 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 				emit(EvTaskDone{ID: "doc_" + d.JobID, Name: d.Name, Kind: "doc", Chapter: d.ChapterID, Passed: reason == "", Reason: reason})
 			}
 		}
+		if opt.DoReads {
+			for _, r := range content.Reads {
+				if !r.Completable() {
+					continue
+				}
+				ok, err := c.CompleteRead(ctx, r)
+				reason := ""
+				if err != nil {
+					reason = err.Error()
+				} else if !ok {
+					reason = "接口未确认"
+				}
+				if reason != "" {
+					logf(true, "阅读完成失败：%s %v", r.Name, reason)
+				} else {
+					readsDone++
+					logf(false, "📖 已完成阅读：%s", r.Name)
+				}
+				emit(EvTaskDone{ID: "read_" + r.JobID, Name: r.Name, Kind: "read", Chapter: r.ChapterID, Passed: reason == "", Reason: reason})
+			}
+		}
 		if opt.DoWorks {
 			for _, w := range content.Works {
 				if w != nil && !w.IsPassed {
@@ -300,7 +356,7 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 			logf(false, "[%s] 有 %d 个直播等未支持的任务点，已跳过", ch.Title, content.Others)
 		}
 	}
-	emit(EvQueued{Videos: len(queue), Docs: docsDone, Skipped: skipped, Works: len(workQueue)})
+	emit(EvQueued{Videos: len(queue), Docs: docsDone, Reads: readsDone, Skipped: skipped, Works: len(workQueue)})
 
 	var (
 		mu                    sync.Mutex
@@ -417,7 +473,7 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 		mu.Lock()
 		worksDone := works
 		mu.Unlock()
-		emit(EvFinished{Passed: passed, Failed: failed, Docs: docsDone, Works: worksDone})
+		emit(EvFinished{Passed: passed, Failed: failed, Docs: docsDone, Reads: readsDone, Works: worksDone})
 	}
 }
 

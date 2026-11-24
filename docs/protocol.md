@@ -211,6 +211,33 @@ pyFlag=&courseId=..&classId=..&workAnswerId=..&answerId=..
 提交会真正写入一次作答记录（有次数上限），由页面上的开关控制；
 `randomOptions=true` 时页面字母与提交值顺序不一致，因此一律按 value 提交。
 
+### 阅读任务点（2026-11 实测）
+
+cards 里的阅读任务是 `module=insertreadV2` 的 iframe，`mArg.attachments` 对应项形如：
+
+```json
+{"type":"read","enc":"…","jtoken":"…","mid":"…","job":true,
+ "property":{"module":"insertreadV2","id":"249705972","_jobid":"read-249705972",
+             "title":"习近平法治思想学习纲要","read":true}}
+```
+
+任务点是否完成看 `job`：未完成时 `job:true`，iframe 的 `data` 里也会带 `jobid`；
+完成后 `job` 字段消失，只剩 `property._jobid`。
+
+完成接口由阅读模块的 `finishJob()` 发出（点「去阅读」时调用，与阅读时长无关）：
+
+```
+GET /mooc-ans/job/readv2
+  ?jobid=read-249705972&knowledgeid=<chapterId>&courseid=<courseId>&clazzid=<classId>
+  &jtoken=<jtoken>&checkMicroTopic=true&microTopicId=<可选>&courseEngineInfo=false&_dc=<毫秒>
+→ {"msg":"考核点已经完成","status":true}
+```
+
+实测点一次「去阅读」后章节 `pending` 立即从 1 变成 0；接口幂等，重复调用仍返回
+`status:true`。专题页里的 `multimedia/readlog` 与 `data-xxt.aichaoxing.com/analysis/ac_mark`
+只是阅读时长统计（“当天阅读时长，次日更新”），**不是**任务点完成条件，可以忽略。
+Go 侧见 `CompleteRead`，扫描到 `Read.Completable()` 的任务点会直接调用该接口。
+
 ### 解析策略（为什么不怕改版）
 
 题目解析只认「提交时真正用到的字段」，CSS class 只用来辅助切分文字：
@@ -302,6 +329,7 @@ cd web && pnpm dev                      # 调试用，/api 自动代理到 127.0
 - `internal/cx/qparse.go`：以提交字段为准的鲁棒解析（容器切分、题干/选项提取、退化兜底）
 - `internal/cx/font.go`：字体提取、字形比对
 - `internal/cx/course.go`：`ChapterContent.Works` 从 cards 收集 work
+- `internal/cx/study.go`：`CompleteRead` 调用 `/mooc-ans/job/readv2` 完成专题阅读任务点
 - `internal/cx/ai.go`：模型作答（OpenAI 兼容 / `response_format=json_object`）
 - `internal/cx/solve.go`：抓题 → 解密 → 作答 → 提交 的完整流程
 - `internal/cx/review.go`：提交后回查批阅页（成绩、对错题数）

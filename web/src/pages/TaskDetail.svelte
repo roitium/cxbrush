@@ -23,7 +23,7 @@
   let hasErr = $derived(logs.some((l) => l.err))
   let errCount = $derived(logs.filter((l) => l.err).length)
 
-  let total = $derived(queued ? (queued.videos || 0) + (queued.docs || 0) + (queued.works || 0) : 0)
+  let total = $derived(queued ? (queued.videos || 0) + (queued.docs || 0) + (queued.reads || 0) + (queued.works || 0) : 0)
   let settled = $derived(items.filter((i) => ['passed', 'failed', 'skipped'].includes(i.state)).length)
   let passed = $derived(items.filter((i) => i.state === 'passed').length)
   let works = $derived(items.filter((i) => i.kind === 'work'))
@@ -53,7 +53,7 @@
     if (phase === 'running' && scan.total && scan.done < scan.total) return `扫描章节 ${scan.done}/${scan.total}`
     if (summary) return summary
     if (task?.message) return task.message
-    if (queued) return `视频 ${queued.videos} · 文档 ${queued.docs} · 测验 ${queued.works}`
+    if (queued) return `视频 ${queued.videos} · 文档 ${queued.docs} · 阅读 ${queued.reads} · 测验 ${queued.works}`
     return ''
   })
 
@@ -124,7 +124,7 @@
     on('scan', (d) => (scan = d))
     on('queued', (d) => {
       queued = d
-      log(`任务点：视频 ${d.videos}，文档 ${d.docs}，测验 ${d.works}，已跳过 ${d.skipped}`)
+      log(`任务点：视频 ${d.videos}，文档 ${d.docs}，阅读 ${d.reads}，测验 ${d.works}，已跳过 ${d.skipped}`)
     })
     on('progress', (d) => {
       progress = { ...progress, [d.id]: d }
@@ -160,7 +160,7 @@
       log(s, d.wrong > 0)
     })
     on('finished', (d) => {
-      summary = `通过 ${d.passed}，失败 ${d.failed}，文档 ${d.docs}，测验 ${d.works}`
+      summary = `通过 ${d.passed}，失败 ${d.failed}，文档 ${d.docs}，阅读 ${d.reads}，测验 ${d.works}`
     })
     on('status', (d) => (phase = d.status))
     on('end', (d) => {
