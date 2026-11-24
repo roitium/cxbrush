@@ -330,14 +330,13 @@ func (r *Runner) run(ctx context.Context, t *store.Task, videos int) {
 			r.finish(t.ID, store.StatusFailed, "字体比对表不可用: "+derr.Error())
 			return
 		}
-		_ = dec
 		ai, aerr := r.Answerer()
 		if aerr != nil {
 			r.finish(t.ID, store.StatusFailed, "答题模型不可用: "+aerr.Error())
 			return
 		}
+		opt.Decoder = dec
 		opt.Answerer = ai
-		opt.FontPath = r.fontPath
 	}
 
 	_ = r.st.UpdateTask(t.ID, store.StatusRunning, "")

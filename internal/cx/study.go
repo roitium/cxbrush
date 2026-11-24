@@ -261,6 +261,8 @@ type RunOptions struct {
 	DoWorks bool
 	// Answerer 是答题模型；DoWorks 时必须提供。
 	Answerer *AIAnswerer
+	// Decoder 是已经加载好的比对字体（进程级单例）；优先于 FontData / FontPath。
+	Decoder *FontDecoder
 	// FontPath 是比对用的完整中文字体；答题页没有混淆字体时可为空。
 	FontPath string
 	// FontData 是内嵌字体数据；优先于 FontPath，避免运行时依赖外部文件。
@@ -395,18 +397,7 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 					return dec
 				}
 				loaded = true
-				if len(opt.FontData) == 0 && opt.FontPath == "" {
-					return nil
-				}
-				var (
-					d   *FontDecoder
-					err error
-				)
-				if len(opt.FontData) > 0 {
-					d, err = NewFontDecoderBytes(opt.FontData, "embedded")
-				} else {
-					d, err = NewFontDecoder(opt.FontPath)
-				}
+				d, err := resolveDecoder(opt)
 				if err != nil {
 					logf(true, "加载比对字体失败：%v", err)
 					return nil
@@ -544,6 +535,20 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// resolveDecoder 优先复用已加载的比对字体，避免每个任务重建 200MB 的字形表。
+func resolveDecoder(opt RunOptions) (*FontDecoder, error) {
+	if opt.Decoder != nil {
+		return opt.Decoder, nil
+	}
+	if len(opt.FontData) > 0 {
+		return NewFontDecoderBytes(opt.FontData, "embedded")
+	}
+	if opt.FontPath == "" {
+		return nil, nil
+	}
+	return NewFontDecoder(opt.FontPath)
 }
 
 // watchVideo 复刻 runLegalVideoWorker：真实时间 × 允许倍速推进，每个间隔上报一次。
