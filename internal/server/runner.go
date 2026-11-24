@@ -37,6 +37,9 @@ type Runner struct {
 	aiMu   sync.Mutex
 	ai     *cx.AIAnswerer
 	aiHash string
+
+	hubMu sync.Mutex
+	hubs  map[int64]*hub
 }
 
 type clientEntry struct {
@@ -56,6 +59,51 @@ func NewRunner(st *store.Store, fontPath string, fontData []byte, workers int, a
 		cancels:        map[int64]context.CancelFunc{},
 		sem:            make(chan struct{}, clampWorkers(workers)),
 		gates:          map[int64]*userGate{},
+		hubs:           map[int64]*hub{},
+	}
+}
+
+// openHub 为一次运行建立进程内事件广播。
+func (r *Runner) openHub(taskID int64) *hub {
+	h := newHub()
+	r.hubMu.Lock()
+	r.hubs[taskID] = h
+	r.hubMu.Unlock()
+	return h
+}
+
+func (r *Runner) closeHub(taskID int64) {
+	r.hubMu.Lock()
+	h := r.hubs[taskID]
+	delete(r.hubs, taskID)
+	r.hubMu.Unlock()
+	if h != nil {
+		h.close()
+	}
+}
+
+// HubOf 返回运行中任务的广播（没有则为 nil），SSE 从这里拿实时增量。
+func (r *Runner) HubOf(taskID int64) *hub {
+	r.hubMu.Lock()
+	defer r.hubMu.Unlock()
+	return r.hubs[taskID]
+}
+
+// HubSeq 返回当前事件序号，页面快照带上它，SSE 从该序号续接。
+func (r *Runner) HubSeq(taskID int64) int64 {
+	h := r.HubOf(taskID)
+	if h == nil {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.seq
+}
+
+// publish 只在任务有活动 hub 时推送；任务结束后自然丢弃。
+func (r *Runner) publish(taskID int64, kind string, data any) {
+	if h := r.HubOf(taskID); h != nil {
+		h.publish(kind, data)
 	}
 }
 
@@ -317,10 +365,17 @@ func (r *Runner) Cancel(taskID int64) bool {
 
 func (r *Runner) finish(taskID int64, status, message string) {
 	_ = r.st.UpdateTask(taskID, status, message)
-	_ = r.st.AddEvent(taskID, "status", map[string]any{"status": status, "message": message})
+	if status != store.StatusDone {
+		// 中断/取消时把还在跑的任务点收尾，界面不会继续显示「正在播放」。
+		_ = r.st.ResolveRunningItems(taskID, "failed", message)
+	}
+	r.publish(taskID, "status", map[string]any{"status": status, "message": message})
 }
 
 func (r *Runner) run(ctx context.Context, t *store.Task, videos int) {
+	r.openHub(t.ID)
+	defer r.closeHub(t.ID)
+
 	c, err := r.ClientFor(t.UserID)
 	if err != nil {
 		r.finish(t.ID, store.StatusFailed, err.Error())
@@ -346,7 +401,7 @@ func (r *Runner) run(ctx context.Context, t *store.Task, videos int) {
 	}
 
 	_ = r.st.UpdateTask(t.ID, store.StatusRunning, "")
-	_ = r.st.AddEvent(t.ID, "status", map[string]any{"status": store.StatusRunning})
+	r.publish(t.ID, "status", map[string]any{"status": store.StatusRunning})
 
 	course := cx.Course{CourseID: t.CourseID, ClassID: t.ClassID, CPI: t.CPI, Name: t.CourseName}
 	chapters := make([]cx.Chapter, 0, len(t.Chapters))
@@ -364,7 +419,14 @@ func (r *Runner) run(ctx context.Context, t *store.Task, videos int) {
 				summary = fmt.Sprintf("通过 %d，失败 %d，文档 %d，阅读 %d，直播 %d，测验 %d", f.Passed, f.Failed, f.Docs, f.Reads, f.Lives, f.Works)
 			}
 			kind, data := eventPayload(e)
-			_ = r.st.AddEvent(t.ID, kind, data)
+			if err := applyEventState(r.st, t.ID, kind, data); err != nil {
+				log.Printf("任务 %d 写入状态失败: %v", t.ID, err)
+			}
+			r.publish(t.ID, kind, data)
+			// 完成/失败同时在日志里留一行，前端只负责展示。
+			if line, isErr, ok := logLineFor(kind, data); ok {
+				r.publish(t.ID, "log", map[string]any{"text": line, "err": isErr})
+			}
 		}
 	}()
 

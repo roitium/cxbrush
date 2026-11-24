@@ -70,7 +70,10 @@
     }))
   })
 
-  let active = $derived(items.filter((i) => i.state === 'running'))
+  const done = $derived(ended || ['done', 'failed', 'canceled'].includes(phase))
+
+  // 任务结束后残留的 running 只是中断时的快照，不再当作「正在播放」。
+  let active = $derived(done ? [] : items.filter((i) => i.state === 'running'))
 
   let statusLine = $derived.by(() => {
     if (phase === 'running' && scan.total && scan.done < scan.total) return `扫描章节 ${scan.done}/${scan.total}`
@@ -141,26 +144,35 @@
     reset()
     loading = true
 
-    // 先拿快照：任务点、最近日志、最后事件 ID 一次到位，然后再从这个 ID 续接 SSE。
-    // 这样打开页面是「立刻完整」，而不是把历史事件慢慢重放一遍。
-    api(`/api/tasks/${tid}`)
-      .then((r) => {
-        if (!alive) return
-        task = r.task
-        for (const it of r.items || []) upsert(it)
-        if (r.logs?.length) {
-          logs = r.logs.map((l) => ({ text: l.text, err: !!l.err, ts: new Date(l.ts) }))
-        }
-        phase = r.task?.status || ''
-        summary = r.task?.message || ''
-        return r.after || 0
+    // 快照 = 任务点当前状态 + 最近日志 + 事件序号。状态表是 O(任务点数)，
+    // 和任务跑了多久无关，所以打开页面是「立刻完整」。
+    async function loadSnapshot() {
+      const r = await api(`/api/tasks/${tid}`)
+      if (!alive) return 0
+      task = r.task
+      items = r.items || []
+      logs = (r.logs || []).map((l) => ({ text: l.text, err: !!l.err, ts: new Date(l.ts) }))
+      phase = r.task?.status || ''
+      summary = r.task?.message || ''
+      return r.seq || 0
+    }
+
+    function connect(after) {
+      es = openStream(tid, after, async () => {
+        // 内存缓冲滚过头了：重新拉一次快照再续接。
+        es?.close()
+        const seq = await loadSnapshot().catch(() => 0)
+        if (alive) connect(seq)
       })
+    }
+
+    loadSnapshot()
       .catch((e) => {
         if (alive) error = e.message
         return 0
       })
-      .then((after) => {
-        if (alive) es = openStream(after)
+      .then((seq) => {
+        if (alive) connect(seq)
       })
       .finally(() => {
         if (alive) loading = false
@@ -171,8 +183,7 @@
     }
   })
 
-  function openStream(after) {
-    const tid = Number(id)
+  function openStream(tid, after, onReset) {
     const es = new EventSource(`/api/tasks/${tid}/events?after=${after}`)
     const on = (kind, fn) => es.addEventListener(kind, (e) => fn(JSON.parse(e.data)))
 
@@ -183,7 +194,6 @@
     })
     on('queued', (d) => {
       queued = d
-      log(`任务点：视频 ${d.videos}，文档 ${d.docs}，阅读 ${d.reads}，直播 ${d.lives}，测验 ${d.works}，已跳过 ${d.skipped}`)
     })
     on('progress', (d) => {
       progress = { ...progress, [d.id]: d }
@@ -198,7 +208,6 @@
         state: d.passed ? 'passed' : 'failed',
         reason: d.reason,
       })
-      log(`${d.passed ? '✓' : '✗'} ${d.name}${d.reason ? ' — ' + d.reason : ''}`, !d.passed)
     })
     on('work', (d) => {
       upsert({
@@ -212,16 +221,12 @@
         correct: d.correct,
         wrong: d.wrong,
       })
-      let s = d.questions ? `${d.title}：${d.questions} 题` : d.title
-      if (d.skipped) s += `，跳过（${d.reason}）`
-      else if (d.submitted) s += '，已提交'
-      if (d.correct || d.wrong) s += `，${d.score} 分（对 ${d.correct} / 错 ${d.wrong}）`
-      log(s, d.wrong > 0)
     })
     on('finished', (d) => {
       summary = `通过 ${d.passed}，失败 ${d.failed}，文档 ${d.docs}，阅读 ${d.reads}，直播 ${d.lives}，测验 ${d.works}`
     })
     on('status', (d) => (phase = d.status))
+    on('reset', () => onReset?.())
     on('end', (d) => {
       ended = true
       phase = d.status
@@ -266,7 +271,6 @@
     }
   }
 
-  const done = $derived(ended || ['done', 'failed', 'canceled'].includes(phase))
 </script>
 
 <div class="page">

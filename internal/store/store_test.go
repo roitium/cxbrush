@@ -115,16 +115,22 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatal("missing key should not exist")
 	}
 
-	if err := st.AddEvent(task.ID, "log", map[string]any{"text": "hi"}); err != nil {
+	if err := st.AddLog(task.ID, "hi", false); err != nil {
 		t.Fatal(err)
 	}
-	evs, err := st.Events(task.ID, 0, 10)
-	if err != nil || len(evs) != 1 || evs[0].Kind != "log" {
-		t.Fatalf("events = %+v %v", evs, err)
+	logs, err := st.Logs(task.ID, 10)
+	if err != nil || len(logs) != 1 || logs[0].Text != "hi" || logs[0].Err {
+		t.Fatalf("logs = %+v %v", logs, err)
 	}
-	var payload map[string]string
-	if err := json.Unmarshal(evs[0].Data, &payload); err != nil || payload["text"] != "hi" {
-		t.Fatalf("event data = %s", evs[0].Data)
+	if err := st.UpsertItem(task.ID, Item{ID: "v1", Name: "1.1", Kind: "video", State: "running", Cur: 5, Total: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertItem(task.ID, Item{ID: "v1", State: "passed"}); err != nil {
+		t.Fatal(err)
+	}
+	its, err := st.Items(task.ID)
+	if err != nil || len(its) != 1 || its[0].State != "passed" || its[0].Cur != 5 || its[0].Name != "1.1" {
+		t.Fatalf("items = %+v %v", its, err)
 	}
 
 	if err := st.UpdateTask(task.ID, StatusRunning, ""); err != nil {
@@ -288,8 +294,8 @@ func TestFirstUserIsAdmin(t *testing.T) {
 	}
 }
 
-// 首屏日志回填只取最近几条，并且按时间正序返回。
-func TestRecentEvents(t *testing.T) {
+// 日志只保留最近 MaxTaskLogs 条，避免长任务把库撑大。
+func TestTaskLogsCapped(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "data"))
 	if err != nil {
 		t.Fatal(err)
@@ -305,25 +311,22 @@ func TestRecentEvents(t *testing.T) {
 	if err := st.CreateTask(task); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 5; i++ {
-		if err := st.AddEvent(task.ID, "log", map[string]any{"text": fmt.Sprintf("l%d", i)}); err != nil {
-			t.Fatal(err)
-		}
-		if err := st.AddEvent(task.ID, "progress", map[string]any{"id": "v"}); err != nil {
+	for i := 0; i < MaxTaskLogs+20; i++ {
+		if err := st.AddLog(task.ID, fmt.Sprintf("l%d", i), false); err != nil {
 			t.Fatal(err)
 		}
 	}
-	evs, err := st.RecentEvents(task.ID, "log", 3)
+	logs, err := st.Logs(task.ID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(evs) != 3 {
-		t.Fatalf("got %d events", len(evs))
+	if len(logs) != MaxTaskLogs {
+		t.Fatalf("got %d logs, want %d", len(logs), MaxTaskLogs)
 	}
-	for i, want := range []string{"l2", "l3", "l4"} {
-		var d struct{ Text string }
-		if err := json.Unmarshal(evs[i].Data, &d); err != nil || d.Text != want {
-			t.Fatalf("events[%d] = %s, want %s", i, evs[i].Data, want)
-		}
+	if logs[len(logs)-1].Text != fmt.Sprintf("l%d", MaxTaskLogs+19) {
+		t.Fatalf("last log = %q", logs[len(logs)-1].Text)
+	}
+	if logs[0].Text != "l20" {
+		t.Fatalf("first kept log = %q", logs[0].Text)
 	}
 }

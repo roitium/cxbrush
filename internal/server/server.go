@@ -59,6 +59,11 @@ func New(st *store.Store, opts Options) *Server {
 	s.runner = NewRunner(st, opts.FontPath, opts.FontData, opts.Workers, opts.AllowPrivateAI)
 	s.routes()
 	s.handler = s.guard(s.mux)
+	// 老库的事件表在这里折叠成状态表，然后丢弃事件表。
+	if err := s.migrateLegacyEvents(); err != nil {
+		log.Printf("迁移历史事件失败（将在下次启动重试）: %v", err)
+	}
+	_ = st.ResolveAllRunningItems("failed", "任务中断")
 	return s
 }
 
@@ -730,181 +735,20 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, after, err := s.taskItems(t.ID)
+	items, err := s.st.Items(t.ID)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// 顺带回填最近日志：页面首屏就能显示完整日志，不用等 SSE 重放历史事件。
-	logs := []logView{}
-	if evs, err := s.st.RecentEvents(t.ID, "log", 200); err == nil {
-		for _, e := range evs {
-			var d struct {
-				Text string
-				Err  bool
-			}
-			if json.Unmarshal(e.Data, &d) != nil {
-				continue
-			}
-			logs = append(logs, logView{TS: e.TS.UnixMilli(), Text: d.Text, Err: d.Err})
-		}
-	}
-	writeJSON(w, map[string]any{"task": t, "items": items, "logs": logs, "after": after})
-}
-
-type logView struct {
-	TS   int64  `json:"ts"`
-	Text string `json:"text"`
-	Err  bool   `json:"err,omitempty"`
-}
-
-// ItemView 是任务内某个任务点（视频/文档/测验）的最新状态。
-type ItemView struct {
-	ID      string  `json:"id"`
-	Kind    string  `json:"kind"`
-	Chapter string  `json:"chapter,omitempty"`
-	Name    string  `json:"name"`
-	State   string  `json:"state"`
-	Cur     int     `json:"cur,omitempty"`
-	Total   int     `json:"total,omitempty"`
-	Score   float64 `json:"score,omitempty"`
-	Correct int     `json:"correct,omitempty"`
-	Wrong   int     `json:"wrong,omitempty"`
-	Reason  string  `json:"reason,omitempty"`
-}
-
-// taskItems 直接折叠已持久化的事件流，不额外维护投影表。
-// 第二个返回值是最后一条事件的 ID，前端可以从这里续接 SSE，避免重放历史。
-func (s *Server) taskItems(taskID int64) ([]ItemView, int64, error) {
-	idx := map[string]int{}
-	var out []ItemView
-	var after int64
-	for {
-		evs, err := s.st.Events(taskID, after, 500)
-		if err != nil {
-			return nil, 0, err
-		}
-		if len(evs) == 0 {
-			break
-		}
-		for _, e := range evs {
-			after = e.ID
-			foldEvent(&out, idx, e)
-		}
-	}
-	return out, after, nil
-}
-
-func foldEvent(out *[]ItemView, idx map[string]int, e store.Event) {
-	switch e.Kind {
-	case "progress":
-		var d struct {
-			ID        string
-			Name      string
-			Kind      string
-			Chapter   string
-			Confirmed int
-			Total     int
-		}
-		if json.Unmarshal(e.Data, &d) != nil || d.ID == "" {
-			return
-		}
-		kind := d.Kind
-		if kind == "" {
-			kind = "video"
-		}
-		upsertItem(out, idx, ItemView{
-			ID: d.ID, Kind: kind, Chapter: d.Chapter, Name: d.Name,
-			State: "running", Cur: d.Confirmed, Total: d.Total,
-		})
-	case "plan":
-		// 扫描完就把整份任务点计划落库，刷新页面也能看到完整清单。
-		var d struct {
-			Items []ItemView
-		}
-		if json.Unmarshal(e.Data, &d) != nil {
-			return
-		}
-		for _, it := range d.Items {
-			if it.ID == "" {
-				continue
-			}
-			upsertItem(out, idx, it)
-		}
-	case "task":
-		var d struct {
-			ID      string
-			Name    string
-			Kind    string
-			Chapter string
-			Passed  bool
-			Reason  string
-		}
-		if json.Unmarshal(e.Data, &d) != nil || d.ID == "" {
-			return
-		}
-		kind := d.Kind
-		if kind == "" {
-			kind = "video"
-		}
-		state := "failed"
-		if d.Passed {
-			state = "passed"
-		}
-		upsertItem(out, idx, ItemView{
-			ID: d.ID, Kind: kind, Chapter: d.Chapter, Name: d.Name,
-			State: state, Reason: d.Reason,
-		})
-	case "work":
-		var d struct {
-			Chapter   string
-			Title     string
-			Questions int
-			Submitted bool
-			Skipped   bool
-			Reason    string
-			Score     float64
-			Correct   int
-			Wrong     int
-		}
-		if json.Unmarshal(e.Data, &d) != nil || d.Title == "" {
-			return
-		}
-		state := "failed"
-		switch {
-		case d.Submitted:
-			state = "passed"
-		case d.Skipped:
-			state = "skipped"
-		}
-		upsertItem(out, idx, ItemView{
-			ID: "work_" + d.Chapter, Kind: "work", Chapter: d.Chapter, Name: d.Title,
-			State: state, Reason: d.Reason, Score: d.Score, Correct: d.Correct, Wrong: d.Wrong,
-		})
-	}
-}
-
-func upsertItem(out *[]ItemView, idx map[string]int, it ItemView) {
-	if i, ok := idx[it.ID]; ok {
-		prev := (*out)[i]
-		// 后到的事件只覆盖有值的字段，避免把看过的进度清零。
-		if it.Name == "" {
-			it.Name = prev.Name
-		}
-		if it.Chapter == "" {
-			it.Chapter = prev.Chapter
-		}
-		if it.Total == 0 && it.Kind == prev.Kind {
-			it.Total = prev.Total
-		}
-		if it.Cur == 0 && it.Kind == prev.Kind {
-			it.Cur = prev.Cur
-		}
-		(*out)[i] = it
+	// 状态和最近的日志都在表里，页面首屏一次拿全；seq 用来续接 SSE 增量。
+	logs, err := s.st.Logs(t.ID, 0)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	idx[it.ID] = len(*out)
-	*out = append(*out, it)
+	writeJSON(w, map[string]any{
+		"task": t, "items": items, "logs": logs, "seq": s.runner.HubSeq(t.ID),
+	})
 }
 
 func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
@@ -961,34 +805,80 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
-	ticker := time.NewTicker(300 * time.Millisecond)
-	defer ticker.Stop()
+	write := func(kind string, body []byte) {
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", kind, body)
+	}
+	writeEnd := func(cur *store.Task) {
+		fmt.Fprintf(w, "event: end\ndata: {\"status\":%q,\"message\":%q}\n\n", cur.Status, cur.Message)
+	}
+	// 先订阅再回放：任务状态随时可能变化，顺序反了会漏事件。
+	h := s.runner.HubOf(t.ID)
+	var (
+		ch      <-chan hubMsg
+		backlog []hubMsg
+		reset   bool
+	)
+	if h != nil {
+		ch, backlog, reset = h.subscribe(after)
+	}
 
-	for {
-		evs, err := s.st.Events(t.ID, after, 200)
-		if err != nil {
-			return
+	flushBacklog := func() {
+		for _, m := range backlog {
+			write(m.Kind, m.Data)
 		}
-		for _, e := range evs {
-			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", e.ID, e.Kind, e.Data)
-			after = e.ID
+		if reset {
+			// 要的起点已经滚出内存缓冲，让前端重新拉一次快照。
+			write("reset", []byte("{}"))
 		}
-		if len(evs) > 0 {
-			flusher.Flush()
-		}
-		// 还有积压的历史事件就立刻取下一批，不要等 ticker（否则长任务要刷好几秒）。
-		if len(evs) == 200 {
-			continue
-		}
-		if cur, err := s.st.Task(t.ID); err == nil && store.Finished(cur.Status) && len(evs) == 0 {
-			fmt.Fprintf(w, "event: end\ndata: {\"status\":%q,\"message\":%q}\n\n", cur.Status, cur.Message)
-			flusher.Flush()
+		flusher.Flush()
+	}
+	flushBacklog()
+
+	// 排队中的任务还没有 hub：等它真正开始，或者等它结束。
+	for ch == nil {
+		cur, err := s.st.Task(t.ID)
+		if err != nil || store.Finished(cur.Status) {
+			if err == nil {
+				writeEnd(cur)
+				flusher.Flush()
+			}
 			return
 		}
 		select {
 		case <-r.Context().Done():
 			return
-		case <-ticker.C:
+		case <-time.After(300 * time.Millisecond):
+		}
+		if h = s.runner.HubOf(t.ID); h != nil {
+			ch, backlog, reset = h.subscribe(0)
+			flushBacklog()
+		}
+	}
+
+	ping := time.NewTicker(20 * time.Second)
+	defer ping.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ping.C:
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case m, ok := <-ch:
+			if !ok {
+				// hub 关闭说明任务跑完了；状态以数据库为准。
+				if cur, err := s.st.Task(t.ID); err == nil && store.Finished(cur.Status) {
+					writeEnd(cur)
+					flusher.Flush()
+					return
+				}
+				// 订阅被断开（客户端太慢），前端重连后会重新同步。
+				return
+			}
+			write(m.Kind, m.Data)
+			flusher.Flush()
 		}
 	}
 }

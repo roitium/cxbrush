@@ -14,12 +14,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite"
 )
 
 // Store 是进程级的数据库句柄，并发安全（sql.DB 自带池，这里限制为单连接）。
 type Store struct {
-	db   *sql.DB
+	db   *sqlx.DB
 	aead cipher.AEAD
 	key  []byte
 }
@@ -42,7 +43,7 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	dsn := "file:" + filepath.Join(dir, "cxbrush.db") + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sqlx.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -74,6 +75,9 @@ func loadKey(path string) ([]byte, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// DB 暴露底层连接，仅供迁移工具和测试使用。
+func (s *Store) DB() *sqlx.DB { return s.db }
 
 // Key 返回 secret.key，供会话签名复用。
 func (s *Store) Key() []byte { return append([]byte(nil), s.key...) }
@@ -107,14 +111,32 @@ CREATE TABLE IF NOT EXISTS tasks (
   updated_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id, id DESC);
-CREATE TABLE IF NOT EXISTS events (
+CREATE TABLE IF NOT EXISTS task_items (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  item_id    TEXT NOT NULL,
+  kind       TEXT NOT NULL DEFAULT '',
+  chapter    TEXT NOT NULL DEFAULT '',
+  name       TEXT NOT NULL DEFAULT '',
+  state      TEXT NOT NULL DEFAULT '',
+  cur        INTEGER NOT NULL DEFAULT 0,
+  total      INTEGER NOT NULL DEFAULT 0,
+  score      REAL NOT NULL DEFAULT 0,
+  correct    INTEGER NOT NULL DEFAULT 0,
+  wrong      INTEGER NOT NULL DEFAULT 0,
+  reason     TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL,
+  UNIQUE(task_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_items_task ON task_items(task_id, id);
+CREATE TABLE IF NOT EXISTS task_logs (
   id      INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   ts      INTEGER NOT NULL,
-  kind    TEXT NOT NULL,
-  data    TEXT NOT NULL
+  text    TEXT NOT NULL,
+  err     INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
+CREATE INDEX IF NOT EXISTS idx_logs_task ON task_logs(task_id, id);
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value BLOB NOT NULL
@@ -212,50 +234,48 @@ func (s *Store) CreateUser(username, passHash string) (*User, error) {
 	return &User{ID: id, Username: username, IsAdmin: admin, CreatedAt: now}, nil
 }
 
-func (s *Store) userFromRow(row *sql.Row) (*User, string, error) {
-	var u User
-	var ts int64
-	var hash string
-	var admin int
-	if err := row.Scan(&u.ID, &u.Username, &hash, &admin, &ts); err != nil {
-		return nil, "", err
-	}
-	u.IsAdmin = admin != 0
-	u.CreatedAt = time.Unix(ts, 0)
-	return &u, hash, nil
+type userRow struct {
+	ID        int64  `db:"id"`
+	Username  string `db:"username"`
+	PassHash  string `db:"pass_hash"`
+	IsAdmin   int    `db:"is_admin"`
+	CreatedAt int64  `db:"created_at"`
 }
 
+func (r userRow) user() *User {
+	return &User{ID: r.ID, Username: r.Username, IsAdmin: r.IsAdmin != 0, CreatedAt: time.Unix(r.CreatedAt, 0)}
+}
+
+const userCols = `id, username, pass_hash, is_admin, created_at`
+
 func (s *Store) UserByName(name string) (*User, string, error) {
-	return s.userFromRow(s.db.QueryRow(
-		`SELECT id, username, pass_hash, is_admin, created_at FROM users WHERE username = ?`, name))
+	var r userRow
+	err := s.db.Get(&r, `SELECT `+userCols+` FROM users WHERE username = ?`, name)
+	if err != nil {
+		return nil, "", err
+	}
+	return r.user(), r.PassHash, nil
 }
 
 func (s *Store) UserByID(id int64) (*User, error) {
-	u, _, err := s.userFromRow(s.db.QueryRow(
-		`SELECT id, username, pass_hash, is_admin, created_at FROM users WHERE id = ?`, id))
-	return u, err
+	var r userRow
+	if err := s.db.Get(&r, `SELECT `+userCols+` FROM users WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	return r.user(), nil
 }
 
 // ListUsers 返回所有用户（管理员页面用）。
 func (s *Store) ListUsers() ([]User, error) {
-	rows, err := s.db.Query(`SELECT id, username, is_admin, created_at FROM users ORDER BY id`)
-	if err != nil {
+	var rows []userRow
+	if err := s.db.Select(&rows, `SELECT `+userCols+` FROM users ORDER BY id`); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []User{}
-	for rows.Next() {
-		var u User
-		var admin int
-		var ts int64
-		if err := rows.Scan(&u.ID, &u.Username, &admin, &ts); err != nil {
-			return nil, err
-		}
-		u.IsAdmin = admin != 0
-		u.CreatedAt = time.Unix(ts, 0)
-		out = append(out, u)
+	out := make([]User, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, *r.user())
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // SetAdmin 调整管理员标记；调用方负责保证至少留一个管理员。
@@ -290,8 +310,11 @@ func (s *Store) SetChaoxing(userID int64, cookie string) error {
 }
 
 func (s *Store) Chaoxing(userID int64) (string, error) {
-	var enc []byte
-	err := s.db.QueryRow(`SELECT cookie FROM chaoxing WHERE user_id = ?`, userID).Scan(&enc)
+	var row struct {
+		Cookie []byte `db:"cookie"`
+	}
+	err := s.db.Get(&row, `SELECT cookie FROM chaoxing WHERE user_id = ?`, userID)
+	enc := row.Cookie
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -307,20 +330,9 @@ func (s *Store) Chaoxing(userID int64) (string, error) {
 
 // UsersWithCookies 返回所有已保存学习通 Cookie 的用户，供会话续期使用。
 func (s *Store) UsersWithCookies() ([]int64, error) {
-	rows, err := s.db.Query(`SELECT user_id FROM chaoxing ORDER BY user_id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
+	err := s.db.Select(&ids, `SELECT user_id FROM chaoxing ORDER BY user_id`)
+	return ids, err
 }
 
 func (s *Store) seal(plain []byte) ([]byte, error) {
@@ -426,15 +438,18 @@ func (p Prefs) Normalized() Prefs {
 // Prefs 读取用户的并行度，没设置过时返回默认值。
 func (s *Store) Prefs(userID int64) (Prefs, error) {
 	def := Prefs{Tasks: DefaultParallelTasks, Videos: DefaultParallelVideos}
-	var tasks, videos int
-	err := s.db.QueryRow(`SELECT tasks, videos FROM prefs WHERE user_id = ?`, userID).Scan(&tasks, &videos)
+	var row struct {
+		Tasks  int `db:"tasks"`
+		Videos int `db:"videos"`
+	}
+	err := s.db.Get(&row, `SELECT tasks, videos FROM prefs WHERE user_id = ?`, userID)
 	if err == sql.ErrNoRows {
 		return def, nil
 	}
 	if err != nil {
 		return def, err
 	}
-	return Prefs{Tasks: tasks, Videos: videos}.Normalized(), nil
+	return Prefs{Tasks: row.Tasks, Videos: row.Videos}.Normalized(), nil
 }
 
 // SetPrefs 保存用户的并行度。
@@ -528,25 +543,30 @@ func (s *Store) UpdateTask(id int64, status, message string) error {
 
 const taskCols = `id, user_id, course_id, class_id, cpi, course_name, chapters, do_works, do_live, status, message, created_at, updated_at`
 
-type scanner interface{ Scan(...any) error }
+type taskRow struct {
+	ID         int64  `db:"id"`
+	UserID     int64  `db:"user_id"`
+	CourseID   int64  `db:"course_id"`
+	ClassID    int64  `db:"class_id"`
+	CPI        int64  `db:"cpi"`
+	CourseName string `db:"course_name"`
+	Chapters   string `db:"chapters"`
+	DoWorks    int    `db:"do_works"`
+	DoLive     int    `db:"do_live"`
+	Status     string `db:"status"`
+	Message    string `db:"message"`
+	CreatedAt  int64  `db:"created_at"`
+	UpdatedAt  int64  `db:"updated_at"`
+}
 
-func scanTask(sc scanner) (*Task, error) {
-	var t Task
-	var chapters, status, message string
-	var doWorks, doLive int
-	var created, updated int64
-	if err := sc.Scan(&t.ID, &t.UserID, &t.CourseID, &t.ClassID, &t.CPI, &t.CourseName,
-		&chapters, &doWorks, &doLive, &status, &message, &created, &updated); err != nil {
-		return nil, err
+func (r taskRow) task() *Task {
+	return &Task{
+		ID: r.ID, UserID: r.UserID, CourseID: r.CourseID, ClassID: r.ClassID, CPI: r.CPI,
+		CourseName: r.CourseName, Chapters: decodeChapters(r.Chapters),
+		DoWorks: r.DoWorks == 1, DoLive: r.DoLive == 1,
+		Status: r.Status, Message: r.Message,
+		CreatedAt: time.Unix(r.CreatedAt, 0), UpdatedAt: time.Unix(r.UpdatedAt, 0),
 	}
-	t.Chapters = decodeChapters(chapters)
-	t.DoWorks = doWorks == 1
-	t.DoLive = doLive == 1
-	t.Status = status
-	t.Message = message
-	t.CreatedAt = time.Unix(created, 0)
-	t.UpdatedAt = time.Unix(updated, 0)
-	return &t, nil
 }
 
 func decodeChapters(raw string) []ChapterRef {
@@ -556,27 +576,27 @@ func decodeChapters(raw string) []ChapterRef {
 }
 
 func (s *Store) Task(id int64) (*Task, error) {
-	return scanTask(s.db.QueryRow(`SELECT `+taskCols+` FROM tasks WHERE id = ?`, id))
+	var r taskRow
+	if err := s.db.Get(&r, `SELECT `+taskCols+` FROM tasks WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	return r.task(), nil
 }
 
 func (s *Store) Tasks(userID int64, limit int) ([]*Task, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.Query(`SELECT `+taskCols+` FROM tasks WHERE user_id = ? ORDER BY id DESC LIMIT ?`, userID, limit)
-	if err != nil {
+	var rows []taskRow
+	if err := s.db.Select(&rows, `SELECT `+taskCols+` FROM tasks WHERE user_id = ? ORDER BY id DESC LIMIT ?`,
+		userID, limit); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Task
-	for rows.Next() {
-		t, err := scanTask(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, t)
+	out := make([]*Task, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.task())
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 type Event struct {
@@ -585,71 +605,6 @@ type Event struct {
 	TS     time.Time       `json:"ts"`
 	Kind   string          `json:"kind"`
 	Data   json.RawMessage `json:"data"`
-}
-
-func (s *Store) AddEvent(taskID int64, kind string, data any) error {
-	body, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec(`INSERT INTO events(task_id, ts, kind, data) VALUES(?,?,?,?)`,
-		taskID, time.Now().UnixMilli(), kind, string(body))
-	return err
-}
-
-func (s *Store) Events(taskID, afterID int64, limit int) ([]Event, error) {
-	if limit <= 0 {
-		limit = 200
-	}
-	rows, err := s.db.Query(`SELECT id, task_id, ts, kind, data FROM events WHERE task_id = ? AND id > ? ORDER BY id LIMIT ?`,
-		taskID, afterID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Event
-	for rows.Next() {
-		var e Event
-		var ts int64
-		var data string
-		if err := rows.Scan(&e.ID, &e.TaskID, &ts, &e.Kind, &data); err != nil {
-			return nil, err
-		}
-		e.TS = time.UnixMilli(ts)
-		e.Data = json.RawMessage(data)
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
-// RecentEvents 返回某类事件的最近 limit 条，按时间正序返回。
-// 页面首屏直接用这批数据回填日志，不必等 SSE 把历史事件重放一遍。
-func (s *Store) RecentEvents(taskID int64, kind string, limit int) ([]Event, error) {
-	if limit <= 0 {
-		limit = 200
-	}
-	rows, err := s.db.Query(`SELECT id, task_id, ts, kind, data FROM (
-			SELECT id, task_id, ts, kind, data FROM events
-			WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT ?
-		) ORDER BY id`,
-		taskID, kind, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Event
-	for rows.Next() {
-		var e Event
-		var ts int64
-		var data string
-		if err := rows.Scan(&e.ID, &e.TaskID, &ts, &e.Kind, &data); err != nil {
-			return nil, err
-		}
-		e.TS = time.UnixMilli(ts)
-		e.Data = json.RawMessage(data)
-		out = append(out, e)
-	}
-	return out, rows.Err()
 }
 
 // RecoverInterrupted 把上次进程退出时仍在跑的任务标成失败，避免重启后卡在 running。
