@@ -137,25 +137,43 @@
   $effect(() => {
     const tid = Number(id)
     let alive = true
+    let es = null
     reset()
     loading = true
 
+    // 先拿快照：任务点、最近日志、最后事件 ID 一次到位，然后再从这个 ID 续接 SSE。
+    // 这样打开页面是「立刻完整」，而不是把历史事件慢慢重放一遍。
     api(`/api/tasks/${tid}`)
       .then((r) => {
         if (!alive) return
         task = r.task
         for (const it of r.items || []) upsert(it)
+        if (r.logs?.length) {
+          logs = r.logs.map((l) => ({ text: l.text, err: !!l.err, ts: new Date(l.ts) }))
+        }
         phase = r.task?.status || ''
         summary = r.task?.message || ''
+        return r.after || 0
       })
       .catch((e) => {
         if (alive) error = e.message
+        return 0
+      })
+      .then((after) => {
+        if (alive) es = openStream(after)
       })
       .finally(() => {
         if (alive) loading = false
       })
+    return () => {
+      alive = false
+      es?.close()
+    }
+  })
 
-    const es = new EventSource(`/api/tasks/${tid}/events?after=0`)
+  function openStream(after) {
+    const tid = Number(id)
+    const es = new EventSource(`/api/tasks/${tid}/events?after=${after}`)
     const on = (kind, fn) => es.addEventListener(kind, (e) => fn(JSON.parse(e.data)))
 
     on('log', (d) => log(d.text, d.err))
@@ -213,12 +231,8 @@
       loadTasks()
     })
     es.onerror = () => {}
-
-    return () => {
-      alive = false
-      es.close()
-    }
-  })
+    return es
+  }
 
   // 日志自动滚到底部，正在跑的时候不用手动找最新一行。
   $effect(() => {

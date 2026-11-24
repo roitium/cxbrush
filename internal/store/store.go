@@ -622,6 +622,36 @@ func (s *Store) Events(taskID, afterID int64, limit int) ([]Event, error) {
 	return out, rows.Err()
 }
 
+// RecentEvents 返回某类事件的最近 limit 条，按时间正序返回。
+// 页面首屏直接用这批数据回填日志，不必等 SSE 把历史事件重放一遍。
+func (s *Store) RecentEvents(taskID int64, kind string, limit int) ([]Event, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.Query(`SELECT id, task_id, ts, kind, data FROM (
+			SELECT id, task_id, ts, kind, data FROM events
+			WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT ?
+		) ORDER BY id`,
+		taskID, kind, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Event
+	for rows.Next() {
+		var e Event
+		var ts int64
+		var data string
+		if err := rows.Scan(&e.ID, &e.TaskID, &ts, &e.Kind, &data); err != nil {
+			return nil, err
+		}
+		e.TS = time.UnixMilli(ts)
+		e.Data = json.RawMessage(data)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // RecoverInterrupted 把上次进程退出时仍在跑的任务标成失败，避免重启后卡在 running。
 func (s *Store) RecoverInterrupted() (int64, error) {
 	res, err := s.db.Exec(`UPDATE tasks SET status = ?, message = ?, updated_at = ? WHERE status IN (?, ?)`,

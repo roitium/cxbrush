@@ -730,12 +730,32 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := s.taskItems(t.ID)
+	items, after, err := s.taskItems(t.ID)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"task": t, "items": items})
+	// 顺带回填最近日志：页面首屏就能显示完整日志，不用等 SSE 重放历史事件。
+	logs := []logView{}
+	if evs, err := s.st.RecentEvents(t.ID, "log", 200); err == nil {
+		for _, e := range evs {
+			var d struct {
+				Text string
+				Err  bool
+			}
+			if json.Unmarshal(e.Data, &d) != nil {
+				continue
+			}
+			logs = append(logs, logView{TS: e.TS.UnixMilli(), Text: d.Text, Err: d.Err})
+		}
+	}
+	writeJSON(w, map[string]any{"task": t, "items": items, "logs": logs, "after": after})
+}
+
+type logView struct {
+	TS   int64  `json:"ts"`
+	Text string `json:"text"`
+	Err  bool   `json:"err,omitempty"`
 }
 
 // ItemView 是任务内某个任务点（视频/文档/测验）的最新状态。
@@ -754,14 +774,15 @@ type ItemView struct {
 }
 
 // taskItems 直接折叠已持久化的事件流，不额外维护投影表。
-func (s *Server) taskItems(taskID int64) ([]ItemView, error) {
+// 第二个返回值是最后一条事件的 ID，前端可以从这里续接 SSE，避免重放历史。
+func (s *Server) taskItems(taskID int64) ([]ItemView, int64, error) {
 	idx := map[string]int{}
 	var out []ItemView
 	var after int64
 	for {
 		evs, err := s.st.Events(taskID, after, 500)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if len(evs) == 0 {
 			break
@@ -771,7 +792,7 @@ func (s *Server) taskItems(taskID int64) ([]ItemView, error) {
 			foldEvent(&out, idx, e)
 		}
 	}
-	return out, nil
+	return out, after, nil
 }
 
 func foldEvent(out *[]ItemView, idx map[string]int, e store.Event) {
@@ -954,6 +975,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(evs) > 0 {
 			flusher.Flush()
+		}
+		// 还有积压的历史事件就立刻取下一批，不要等 ticker（否则长任务要刷好几秒）。
+		if len(evs) == 200 {
+			continue
 		}
 		if cur, err := s.st.Task(t.ID); err == nil && store.Finished(cur.Status) && len(evs) == 0 {
 			fmt.Fprintf(w, "event: end\ndata: {\"status\":%q,\"message\":%q}\n\n", cur.Status, cur.Message)

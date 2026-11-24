@@ -287,3 +287,43 @@ func TestFirstUserIsAdmin(t *testing.T) {
 		t.Fatalf("AdminCount = %d %v", n, err)
 	}
 }
+
+// 首屏日志回填只取最近几条，并且按时间正序返回。
+func TestRecentEvents(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	u, err := st.CreateUser("alice", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &Task{UserID: u.ID, CourseID: 1, ClassID: 1, CPI: 1, CourseName: "c",
+		Chapters: []ChapterRef{{ID: "1", Title: "第一章"}}, DoWorks: true, DoLive: false,
+		Status: StatusRunning}
+	if err := st.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := st.AddEvent(task.ID, "log", map[string]any{"text": fmt.Sprintf("l%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.AddEvent(task.ID, "progress", map[string]any{"id": "v"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	evs, err := st.RecentEvents(task.ID, "log", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 3 {
+		t.Fatalf("got %d events", len(evs))
+	}
+	for i, want := range []string{"l2", "l3", "l4"} {
+		var d struct{ Text string }
+		if err := json.Unmarshal(evs[i].Data, &d); err != nil || d.Text != want {
+			t.Fatalf("events[%d] = %s, want %s", i, evs[i].Data, want)
+		}
+	}
+}

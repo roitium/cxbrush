@@ -140,9 +140,12 @@ func TestTaskItemsPagesThroughEvents(t *testing.T) {
 	}
 
 	s := &Server{st: st}
-	items, err := s.taskItems(task.ID)
+	items, after, err := s.taskItems(task.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if after == 0 {
+		t.Fatal("taskItems 应返回最后一条事件的 ID")
 	}
 	if len(items) != 2 {
 		t.Fatalf("want 2 items after paging, got %+v", items)
