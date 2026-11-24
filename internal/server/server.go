@@ -796,6 +796,20 @@ func foldEvent(out *[]ItemView, idx map[string]int, e store.Event) {
 			ID: d.ID, Kind: kind, Chapter: d.Chapter, Name: d.Name,
 			State: "running", Cur: d.Confirmed, Total: d.Total,
 		})
+	case "plan":
+		// 扫描完就把整份任务点计划落库，刷新页面也能看到完整清单。
+		var d struct {
+			Items []ItemView
+		}
+		if json.Unmarshal(e.Data, &d) != nil {
+			return
+		}
+		for _, it := range d.Items {
+			if it.ID == "" {
+				continue
+			}
+			upsertItem(out, idx, it)
+		}
 	case "task":
 		var d struct {
 			ID      string

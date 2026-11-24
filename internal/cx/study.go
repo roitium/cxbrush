@@ -213,6 +213,24 @@ type EvQueued struct {
 	Videos, Docs, Reads, Lives, Skipped, Works int
 }
 
+// PlanItem 是扫描阶段就能确定的任务点（未开始的也算），用来让界面一次显示完整清单，
+// 而不是等任务点真正开始才一条条冒出来。
+type PlanItem struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Chapter string `json:"chapter"`
+	// State 取 pending / passed / skipped；failed 留给运行结果。
+	State  string `json:"state,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	Cur    int    `json:"cur,omitempty"`
+	Total  int    `json:"total,omitempty"`
+}
+
+type EvPlan struct {
+	Items []PlanItem
+}
+
 type EvProgress struct {
 	ID, Name  string
 	Kind      string // video / live
@@ -283,10 +301,83 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 	logf := func(err bool, f string, a ...any) { emit(EvLog{Text: fmt.Sprintf(f, a...), Err: err}) }
 
 	emit(EvScan{0, len(chapters)})
+	logf(false, "开始扫描 %d 个章节…", len(chapters))
 	contents, errs := c.ScanChapters(ctx, &course, chapters, func(done int) { emit(EvScan{done, len(chapters)}) })
 	if ctx.Err() != nil {
 		return
 	}
+
+	chapterTitle := make(map[string]string, len(chapters))
+	for _, ch := range chapters {
+		chapterTitle[ch.ID] = ch.Title
+	}
+	chTitle := func(id string) string {
+		if t := chapterTitle[id]; t != "" {
+			return t
+		}
+		return id
+	}
+
+	// 先把整份计划发出去：界面立刻能看到所有待做任务点，而不是等它们陆续开始。
+	var plan []PlanItem
+	for i, content := range contents {
+		if errs[i] != nil {
+			continue
+		}
+		for _, v := range content.Videos {
+			if v == nil || !v.IsJob {
+				continue
+			}
+			it := PlanItem{ID: v.ID(), Name: v.Name, Kind: "video", Chapter: v.ChapterID, State: "pending", Total: v.ClipEnd()}
+			switch {
+			case v.IsPassed:
+				it.State, it.Cur = "passed", it.Total
+			case v.NeedFace:
+				it.State, it.Reason = "skipped", "需要人脸抓拍"
+			case !v.Reportable():
+				it.State, it.Reason = "skipped", "缺少上报参数"
+			}
+			plan = append(plan, it)
+		}
+		for _, d := range content.Docs {
+			if d == nil || !d.Completable() {
+				continue
+			}
+			plan = append(plan, PlanItem{ID: "doc_" + d.JobID, Name: d.Name, Kind: "doc", Chapter: d.ChapterID, State: "pending"})
+		}
+		for _, r := range content.Reads {
+			if r == nil || !r.Completable() {
+				continue
+			}
+			plan = append(plan, PlanItem{ID: "read_" + r.JobID, Name: r.Name, Kind: "read", Chapter: r.ChapterID, State: "pending"})
+		}
+		for _, l := range content.Lives {
+			if l == nil || !l.IsJob {
+				continue
+			}
+			it := PlanItem{ID: "live_" + l.JobID, Name: l.Title, Kind: "live", Chapter: l.ChapterID, State: "pending"}
+			switch {
+			case l.IsPassed:
+				it.State = "passed"
+			case !l.Completable():
+				it.State, it.Reason = "skipped", "缺少直播参数"
+			}
+			plan = append(plan, it)
+		}
+		for _, w := range content.Works {
+			if w == nil {
+				continue
+			}
+			it := PlanItem{ID: "work_" + w.ChapterID, Name: firstNonEmpty(w.Title, w.WorkID, w.JobID), Kind: "work", Chapter: w.ChapterID, State: "pending"}
+			if w.IsPassed {
+				it.State = "passed"
+			}
+			plan = append(plan, it)
+		}
+	}
+	emit(EvPlan{Items: plan})
+	logf(false, "扫描完成：%d 个任务点待处理（视频 %d · 文档 %d · 阅读 %d · 直播 %d · 测验 %d）",
+		len(plan), countKind(plan, "video"), countKind(plan, "doc"), countKind(plan, "read"), countKind(plan, "live"), countKind(plan, "work"))
 
 	var queue []*Video
 	var liveQueue []*Live
@@ -412,10 +503,10 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 					return
 				}
 				title := firstNonEmpty(w.Title, w.WorkID, w.JobID)
-				logf(false, "[%s] 发现测验：%s，开始自动作答", w.ChapterID, title)
+				logf(false, "[%s] 发现测验：%s，开始自动作答", chTitle(w.ChapterID), title)
 				res, err := c.SolveWork(ctx, w, ensureDecoder(), opt.Answerer, opt.Cache)
 				if err != nil {
-					logf(true, "[%s] 测验 %s 作答失败：%v", w.ChapterID, title, err)
+					logf(true, "[%s] 测验 %s 作答失败：%v", chTitle(w.ChapterID), title, err)
 					emit(EvWorkDone{Chapter: w.ChapterID, Title: title, Reason: err.Error()})
 					continue
 				}
@@ -426,7 +517,7 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 				switch {
 				case res.Skipped:
 					ev.Skipped, ev.Reason = true, res.SkipReason
-					logf(false, "[%s] 测验 %s 跳过：%s", w.ChapterID, title, res.SkipReason)
+					logf(false, "[%s] 测验 %s 跳过：%s", chTitle(w.ChapterID), title, res.SkipReason)
 				case res.Submitted:
 					ev.Submitted = true
 					detail := fmt.Sprintf("%d 题已提交", ev.Questions)
@@ -442,7 +533,7 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 					} else if res.ReviewErr != nil {
 						detail += "，批阅回查失败：" + res.ReviewErr.Error()
 					}
-					logf(false, "[%s] 测验 %s：%s", w.ChapterID, title, detail)
+					logf(false, "[%s] 测验 %s：%s", chTitle(w.ChapterID), title, detail)
 					mu.Lock()
 					works++
 					mu.Unlock()
@@ -463,6 +554,7 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 		go func(v *Video) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			logf(false, "[%s] ▶ 开始播放：%s（%d 秒）", chTitle(v.ChapterID), v.Name, v.ClipEnd())
 			ok, err := c.watchVideo(ctx, v, emit)
 			if ctx.Err() != nil {
 				return
@@ -494,7 +586,7 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 			defer wg.Done()
 			defer func() { <-sem }()
 			id := "live_" + l.JobID
-			logf(false, "[%s] 开始直播：%s，按真实时长上报", l.ChapterID, l.Title)
+			logf(false, "[%s] ▶ 开始直播：%s，按真实时长上报", chTitle(l.ChapterID), l.Title)
 			ok, err := c.WatchLive(ctx, l, func(p LiveProgress) {
 				emit(EvProgress{
 					ID: id, Name: l.Title, Kind: "live", Chapter: l.ChapterID,
@@ -515,7 +607,7 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 			reason := ""
 			if err != nil {
 				reason = err.Error()
-				logf(true, "[%s] 直播 %s 未完成：%v", l.ChapterID, l.Title, err)
+				logf(true, "[%s] 直播 %s 未完成：%v", chTitle(l.ChapterID), l.Title, err)
 			} else {
 				logf(false, "📺 已完成直播：%s", l.Title)
 			}
@@ -540,6 +632,16 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func countKind(items []PlanItem, kind string) int {
+	n := 0
+	for _, it := range items {
+		if it.Kind == kind {
+			n++
+		}
+	}
+	return n
 }
 
 // resolveDecoder 优先复用已加载的比对字体，避免每个任务重建 200MB 的字形表。

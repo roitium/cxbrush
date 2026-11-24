@@ -17,22 +17,38 @@
   let ended = $state(false)
   let loading = $state(true)
   let error = $state('')
-  let logsOpen = $state(false)
+  let logsOpen = $state(true)
   let busy = $state(false)
+  let logBox = $state(null)
 
   let hasErr = $derived(logs.some((l) => l.err))
   let errCount = $derived(logs.filter((l) => l.err).length)
 
-  let total = $derived(queued ? (queued.videos || 0) + (queued.docs || 0) + (queued.reads || 0) + (queued.lives || 0) + (queued.works || 0) : 0)
+  // 任务点总数以扫描出的计划为准（含已完成/跳过的），否则各计数口径不一致。
+  let total = $derived(
+    items.length ||
+      (queued ? (queued.videos || 0) + (queued.docs || 0) + (queued.reads || 0) + (queued.lives || 0) + (queued.works || 0) : 0),
+  )
   let settled = $derived(items.filter((i) => ['passed', 'failed', 'skipped'].includes(i.state)).length)
   let passed = $derived(items.filter((i) => i.state === 'passed').length)
   let works = $derived(items.filter((i) => i.kind === 'work'))
   let workDone = $derived(works.filter((i) => i.state === 'passed').length)
 
+  // 已完成的任务点算 1，正在播的按视频自身进度折算。否则一节 10 分钟的视频
+  // 会让整体进度一直停在 0%，看起来像卡住了。
+  let progressUnits = $derived.by(() => {
+    let sum = 0
+    for (const it of items) {
+      if (['passed', 'failed', 'skipped'].includes(it.state)) sum += 1
+      else if (it.state === 'running' && it.total) sum += Math.min(1, (it.cur || 0) / it.total)
+    }
+    return sum
+  })
+
   let pct = $derived.by(() => {
     if (scan.total && scan.done < scan.total) return (scan.done / scan.total) * 100
     if (ended && phase === 'done') return 100
-    if (total) return Math.min(100, (settled / total) * 100)
+    if (total) return Math.min(100, (progressUnits / total) * 100)
     if (ended) return phase === 'done' ? 100 : 0
     return 0
   })
@@ -46,11 +62,24 @@
       if (!m.has(k)) m.set(k, [])
       m.get(k).push(it)
     }
-    return [...m].map(([name, list]) => ({ name, items: list, passed: list.filter((x) => x.state === 'passed').length }))
+    return [...m].map(([key, list]) => ({
+      key,
+      name: chapterName(key),
+      items: list,
+      passed: list.filter((x) => x.state === 'passed').length,
+    }))
   })
+
+  let active = $derived(items.filter((i) => i.state === 'running'))
 
   let statusLine = $derived.by(() => {
     if (phase === 'running' && scan.total && scan.done < scan.total) return `扫描章节 ${scan.done}/${scan.total}`
+    if (active.length) {
+      const playing = active.some((a) => a.kind === 'video' || a.kind === 'live')
+      return `${playing ? '正在播放' : '正在处理'} ${active.length} 个任务点`
+    }
+    // 章节之间的空档（比如正在拉下一章、或在做文档）也要有个「在做的事」，避免看起来卡住。
+    if (phase === 'running' && logs.length) return logs[logs.length - 1].text
     if (summary) return summary
     if (task?.message) return task.message
     if (queued) return `视频 ${queued.videos} · 文档 ${queued.docs} · 阅读 ${queued.reads} · 直播 ${queued.lives} · 测验 ${queued.works}`
@@ -59,9 +88,18 @@
 
   const icon = { passed: '✓', failed: '✗', running: '·', skipped: '–' }
 
+  // 事件里只带 chapterId，用任务自身的章节表还原可读的章节名。
+  function chapterName(id) {
+    if (!id) return '未分组'
+    const hit = task?.chapters?.find((c) => String(c.id) === String(id))
+    return hit?.title || String(id)
+  }
+
   function describe(it) {
     const bits = []
-    if ((it.kind === 'video' || it.kind === 'live') && it.total) bits.push(`${it.cur || 0}/${it.total} 秒`)
+    if ((it.kind === 'video' || it.kind === 'live') && it.total) {
+      bits.push(it.state === 'pending' ? `${it.total} 秒` : `${it.cur || 0}/${it.total} 秒`)
+    }
     if (it.kind === 'work') {
       if (it.state === 'skipped') bits.push(`跳过${it.reason ? `：${it.reason}` : ''}`)
       else if (it.state === 'passed') bits.push(`${it.score ?? 0} 分`)
@@ -92,7 +130,7 @@
     phase = ''
     summary = ''
     ended = false
-    logsOpen = false
+    logsOpen = true
     error = ''
   }
 
@@ -122,6 +160,9 @@
 
     on('log', (d) => log(d.text, d.err))
     on('scan', (d) => (scan = d))
+    on('plan', (d) => {
+      for (const it of d.items || []) upsert(it)
+    })
     on('queued', (d) => {
       queued = d
       log(`任务点：视频 ${d.videos}，文档 ${d.docs}，阅读 ${d.reads}，直播 ${d.lives}，测验 ${d.works}，已跳过 ${d.skipped}`)
@@ -177,6 +218,12 @@
       alive = false
       es.close()
     }
+  })
+
+  // 日志自动滚到底部，正在跑的时候不用手动找最新一行。
+  $effect(() => {
+    logs.length
+    if (logsOpen && logBox) logBox.scrollTop = logBox.scrollHeight
   })
 
   async function cancel() {
@@ -242,7 +289,10 @@
       <div class="prow">
         <b class="num pct">{Math.round(pct)}%</b>
         <div class="ptext">
-          <span class="status">{statusLine || '等待开始…'}</span>
+          <span class="status">
+            {#if !done && phase !== 'queued'}<i class="beat"></i>{/if}
+            {statusLine || '等待开始…'}
+          </span>
           <span class="hint">
             {#if total}
               {settled}/{total} 任务点
@@ -254,6 +304,20 @@
         </div>
       </div>
       <div class="bar {barClass}"><i style="width:{Math.min(100, pct)}%"></i></div>
+      {#if active.length}
+        {#each active.slice(0, 4) as a (a.id)}
+          <div class="current">
+            <span class="hint">当前</span>
+            <span class="cname truncate">{a.name}</span>
+            {#if a.total}
+              <span class="cbar"><i style="width:{Math.min(100, ((a.cur || 0) / a.total) * 100)}%"></i></span>
+              <span class="num hint">{a.cur || 0}/{a.total} 秒</span>
+            {:else}
+              <span class="num hint">处理中…</span>
+            {/if}
+          </div>
+        {/each}
+      {/if}
     </section>
 
     <div class="grid">
@@ -273,7 +337,7 @@
           </div>
         {:else}
           <div class="groups">
-            {#each groups as g (g.name)}
+            {#each groups as g (g.key)}
               <div class="grp">
                 <div class="ghead">
                   <span class="gname truncate">{g.name}</span>
@@ -302,7 +366,7 @@
               <span class="sp"></span>
               <span class="chev">▾</span>
             </summary>
-            <div class="log">
+            <div class="log" bind:this={logBox}>
               {#each logs as l}
                 <div class="line">
                   <span class="ts">{l.ts.toLocaleTimeString('zh-CN', { hour12: false })}</span>
@@ -347,7 +411,26 @@
   .prow { display: flex; align-items: center; gap: 18px; }
   .pct { font-size: 28px; font-weight: 600; line-height: 1; min-width: 86px; }
   .ptext { display: grid; gap: 2px; min-width: 0; }
-  .status { font-size: 13px; color: var(--fg-2); }
+  .status { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--fg-2); }
+  .beat {
+    width: 7px; height: 7px; flex: none;
+    border-radius: 50%;
+    background: var(--acc-2);
+    box-shadow: 0 0 0 0 rgba(91, 140, 255, .55);
+    animation: beat 1.6s ease-out infinite;
+  }
+  @keyframes beat {
+    0% { box-shadow: 0 0 0 0 rgba(91, 140, 255, .5); }
+    70% { box-shadow: 0 0 0 7px rgba(91, 140, 255, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(91, 140, 255, 0); }
+  }
+  .current {
+    display: flex; align-items: center; gap: 9px;
+    padding-top: 2px; font-size: 12.5px;
+  }
+  .cname { color: var(--fg-2); min-width: 0; max-width: 46%; }
+  .cbar { flex: 1; height: 3px; border-radius: 999px; background: var(--line); overflow: hidden; }
+  .cbar i { display: block; height: 100%; background: var(--acc-2); border-radius: inherit; }
   .grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr); gap: 14px; align-items: start; }
   .rail { display: grid; gap: 14px; align-content: start; min-width: 0; }
   .groups { display: grid; gap: 4px; max-height: 560px; overflow: auto; }
@@ -368,6 +451,7 @@
   .mark.failed { color: #f4868a; border-color: #5b2a2e; background: rgba(244, 103, 106, .09); }
   .mark.running { color: var(--acc-2); border-color: #2c4370; background: rgba(91, 140, 255, .1); }
   .mark.skipped { color: var(--dim-2); }
+  .mark.pending { color: var(--dim-2); border-style: dashed; }
   .iname { flex: 1; color: var(--fg-2); }
   .idetail { font-size: 11px; color: var(--dim-2); flex: none; max-width: 46%; text-align: right; }
   .logcard { padding: 14px 18px; }

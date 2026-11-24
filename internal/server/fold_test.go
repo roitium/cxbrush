@@ -154,3 +154,23 @@ func TestTaskItemsPagesThroughEvents(t *testing.T) {
 		t.Fatalf("work item: %+v", items[1])
 	}
 }
+
+// 扫描阶段的 plan 事件要能落进快照：刷新后仍能看到全部未开始的任务点。
+func TestFoldEventPlan(t *testing.T) {
+	out := foldAll(
+		ev("plan", map[string]any{"items": []map[string]any{
+			{"id": "v1", "name": "1.1 视频", "kind": "video", "chapter": "ch1", "state": "pending", "total": 600},
+			{"id": "v2", "name": "1.2 视频", "kind": "video", "chapter": "ch1", "state": "passed", "cur": 300, "total": 300},
+		}}),
+		ev("task", map[string]any{"id": "v1", "name": "1.1 视频", "kind": "video", "chapter": "ch1", "passed": true}),
+	)
+	if len(out) != 2 {
+		t.Fatalf("want 2 items, got %+v", out)
+	}
+	if out[0].ID != "v1" || out[0].State != "passed" || out[0].Total != 600 {
+		t.Fatalf("video item: %+v", out[0])
+	}
+	if out[1].ID != "v2" || out[1].State != "passed" || out[1].Cur != 300 {
+		t.Fatalf("passed item: %+v", out[1])
+	}
+}

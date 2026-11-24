@@ -390,6 +390,8 @@ func eventPayload(e cx.Event) (string, any) {
 		return "scan", map[string]any{"done": v.Done, "total": v.Total}
 	case cx.EvQueued:
 		return "queued", map[string]any{"videos": v.Videos, "docs": v.Docs, "reads": v.Reads, "lives": v.Lives, "skipped": v.Skipped, "works": v.Works}
+	case cx.EvPlan:
+		return "plan", map[string]any{"items": v.Items}
 	case cx.EvProgress:
 		return "progress", map[string]any{
 			"id": v.ID, "name": v.Name, "chapter": v.Chapter, "sec": v.Sec, "confirmed": v.Confirmed,
