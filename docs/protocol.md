@@ -345,8 +345,10 @@ cd web && pnpm dev                      # 调试用，/api 自动代理到 127.0
 | GET | `/api/me` | 当前用户与 Cookie 状态 |
 | PUT | `/api/chaoxing` | 保存并校验学习通 Cookie |
 | POST | `/api/chaoxing/login` | 手机号/密码登录学习通（只落 Cookie） |
-| GET/PUT | `/api/settings/ai` | 读取/保存答题模型配置（`clear:true` 清除） |
-| POST | `/api/settings/ai/test` | 用当前或指定的配置做一次连通性测试 |
+| GET/PUT | `/api/admin/ai` | 读取/保存全局答题模型配置（管理员，`clear:true` 清除） |
+| POST | `/api/admin/ai/test` | 用当前或指定的配置做一次连通性测试（管理员） |
+| GET | `/api/admin/users` | 用户列表（管理员） |
+| POST | `/api/admin/users/{id}/admin` | 调整管理员标记，至少保留一个（管理员） |
 | GET | `/api/courses` `/api/chapters` | 课程/章节 |
 | POST | `/api/tasks` | 新建刷课任务 |
 | GET | `/api/tasks` `/api/tasks/{id}` | 任务列表/详情（详情含折叠出的事件 `items`） |

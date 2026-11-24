@@ -9,6 +9,7 @@
   import Tasks from './pages/Tasks.svelte'
   import TaskDetail from './pages/TaskDetail.svelte'
   import Settings from './pages/Settings.svelte'
+  import Admin from './pages/Admin.svelte'
 
   onMount(bootstrap)
 
@@ -35,6 +36,15 @@
       <Tasks />
     {:else if route.name === 'task'}
       <TaskDetail id={route.id} />
+    {:else if route.name === 'admin'}
+      {#if app.me?.isAdmin}
+        <Admin />
+      {:else}
+        <div class="deny">
+          <h1>仅管理员可访问</h1>
+          <p class="hint">模型配置由管理员统一维护，你可以返回 <a href="#/">概览</a> 继续刷课。</p>
+        </div>
+      {/if}
     {:else}
       <Settings />
     {/if}
@@ -60,4 +70,6 @@
     animation: bob 1.6s ease-in-out infinite;
   }
   @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  .deny { max-width: 520px; margin: 18vh auto 0; padding: 0 20px; display: grid; gap: 8px; }
+  .deny h1 { font-size: 20px; }
 </style>

@@ -1,6 +1,7 @@
 function parse(hash) {
   const path = (hash || '').replace(/^#/, '') || '/'
   const parts = path.split('/').filter(Boolean)
+  if (parts[0] === 'admin') return { name: 'admin', path }
   if (parts[0] === 'settings') return { name: 'settings', path }
   if (parts[0] === 'tasks') {
     const id = Number(parts[1])

@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -28,26 +27,25 @@ type AnswerStore interface {
 }
 
 // AnswerCache 是可持久化的题目答案缓存；nil 表示不启用。
+// 缓存全局共享：同一份题库（题目 + 选项正文）答过一次，所有用户都能复用。
 // store 为 nil 时退化为进程内内存缓存。
 type AnswerCache struct {
-	mu     sync.Mutex
-	store  AnswerStore
-	userID int64
-	mem    map[string]cacheEntry
+	mu    sync.Mutex
+	store AnswerStore
+	mem   map[string]cacheEntry
 }
 
-// NewAnswerCache 用持久层构造某个用户的缓存；store 为 nil 时等价于内存缓存。
-// 缓存按用户隔离，避免一个用户的错误答案被其他人复用。
-func NewAnswerCache(store AnswerStore, userID int64) *AnswerCache {
+// NewAnswerCache 用持久层构造缓存；store 为 nil 时等价于内存缓存。
+func NewAnswerCache(store AnswerStore) *AnswerCache {
 	if store == nil {
-		return NewMemoryAnswerCache(userID)
+		return NewMemoryAnswerCache()
 	}
-	return &AnswerCache{store: store, userID: userID}
+	return &AnswerCache{store: store}
 }
 
 // NewMemoryAnswerCache 构造只存在于当前进程的缓存（测试用）。
-func NewMemoryAnswerCache(userID int64) *AnswerCache {
-	return &AnswerCache{userID: userID, mem: map[string]cacheEntry{}}
+func NewMemoryAnswerCache() *AnswerCache {
+	return &AnswerCache{mem: map[string]cacheEntry{}}
 }
 
 func normText(s string) string {
@@ -71,11 +69,7 @@ func questionCacheKey(q *Question) string {
 }
 
 func (c *AnswerCache) storeKey(q *Question) string {
-	key := questionCacheKey(q)
-	if c.userID == 0 {
-		return key
-	}
-	return fmt.Sprintf("%d:%s", c.userID, key)
+	return questionCacheKey(q)
 }
 
 // Lookup 返回命中题目的提交值，以及需要交给模型的题目。

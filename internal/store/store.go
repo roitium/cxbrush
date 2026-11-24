@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS users (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   username   TEXT NOT NULL UNIQUE,
   pass_hash  TEXT NOT NULL,
+  is_admin   INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS chaoxing (
@@ -140,58 +141,134 @@ func (s *Store) migrate() error {
 		!strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
-	// 旧版模型配置是全局的，迁移给第一个用户，避免继续被所有人共用。
-	var legacy []byte
-	if err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, legacyAIConfigKey).Scan(&legacy); err == nil {
-		var uid int64
-		if err := s.db.QueryRow(`SELECT id FROM users ORDER BY id LIMIT 1`).Scan(&uid); err == nil {
-			if _, err := s.db.Exec(`INSERT INTO settings(key, value) VALUES(?,?)
-				ON CONFLICT(key) DO UPDATE SET value=excluded.value`, aiConfigKey(uid), legacy); err != nil {
-				return err
-			}
-			if _, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, legacyAIConfigKey); err != nil {
-				return err
-			}
-		}
+	if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	// 没有任何管理员时（老库升级），把最早注册的用户提升为管理员。
+	if _, err := s.db.Exec(`UPDATE users SET is_admin = 1
+		WHERE id = (SELECT MIN(id) FROM users)
+		  AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin = 1)`); err != nil {
+		return err
+	}
+	// 上一版按用户存模型配置；现在统一归管理员，把其中一份迁回全局键。
+	if err := s.migratePerUserAIConfig(); err != nil {
+		return err
 	}
 	return nil
+}
+
+func (s *Store) migratePerUserAIConfig() error {
+	var exists int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM settings WHERE key = ?`, aiConfigKey).Scan(&exists); err != nil {
+		return err
+	}
+	if exists > 0 {
+		// 已有全局配置；用户级残留直接清掉，避免以后误读。
+		_, err := s.db.Exec(`DELETE FROM settings WHERE key LIKE 'ai:%'`)
+		return err
+	}
+	// 优先拿管理员的，没有就按用户 id 取最早的一份。
+	var enc []byte
+	err := s.db.QueryRow(`SELECT s.value FROM settings s
+		WHERE s.key LIKE 'ai:%'
+		ORDER BY (SELECT is_admin FROM users u WHERE 'ai:' || u.id = s.key) DESC, s.key
+		LIMIT 1`).Scan(&enc)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`INSERT INTO settings(key, value) VALUES(?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, aiConfigKey, enc); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`DELETE FROM settings WHERE key LIKE 'ai:%'`)
+	return err
 }
 
 type User struct {
 	ID        int64     `json:"id"`
 	Username  string    `json:"username"`
+	IsAdmin   bool      `json:"isAdmin"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
 func (s *Store) CreateUser(username, passHash string) (*User, error) {
 	now := time.Now()
-	res, err := s.db.Exec(`INSERT INTO users(username, pass_hash, created_at) VALUES(?,?,?)`,
-		username, passHash, now.Unix())
+	n, err := s.CountUsers()
+	if err != nil {
+		return nil, err
+	}
+	// 第一个注册的用户是管理员：模型配置只有他能改。
+	admin := n == 0
+	res, err := s.db.Exec(`INSERT INTO users(username, pass_hash, is_admin, created_at) VALUES(?,?,?,?)`,
+		username, passHash, boolInt(admin), now.Unix())
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return &User{ID: id, Username: username, CreatedAt: now}, nil
+	return &User{ID: id, Username: username, IsAdmin: admin, CreatedAt: now}, nil
 }
 
 func (s *Store) userFromRow(row *sql.Row) (*User, string, error) {
 	var u User
 	var ts int64
 	var hash string
-	if err := row.Scan(&u.ID, &u.Username, &hash, &ts); err != nil {
+	var admin int
+	if err := row.Scan(&u.ID, &u.Username, &hash, &admin, &ts); err != nil {
 		return nil, "", err
 	}
+	u.IsAdmin = admin != 0
 	u.CreatedAt = time.Unix(ts, 0)
 	return &u, hash, nil
 }
 
 func (s *Store) UserByName(name string) (*User, string, error) {
-	return s.userFromRow(s.db.QueryRow(`SELECT id, username, pass_hash, created_at FROM users WHERE username = ?`, name))
+	return s.userFromRow(s.db.QueryRow(
+		`SELECT id, username, pass_hash, is_admin, created_at FROM users WHERE username = ?`, name))
 }
 
 func (s *Store) UserByID(id int64) (*User, error) {
-	u, _, err := s.userFromRow(s.db.QueryRow(`SELECT id, username, pass_hash, created_at FROM users WHERE id = ?`, id))
+	u, _, err := s.userFromRow(s.db.QueryRow(
+		`SELECT id, username, pass_hash, is_admin, created_at FROM users WHERE id = ?`, id))
 	return u, err
+}
+
+// ListUsers 返回所有用户（管理员页面用）。
+func (s *Store) ListUsers() ([]User, error) {
+	rows, err := s.db.Query(`SELECT id, username, is_admin, created_at FROM users ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []User{}
+	for rows.Next() {
+		var u User
+		var admin int
+		var ts int64
+		if err := rows.Scan(&u.ID, &u.Username, &admin, &ts); err != nil {
+			return nil, err
+		}
+		u.IsAdmin = admin != 0
+		u.CreatedAt = time.Unix(ts, 0)
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// SetAdmin 调整管理员标记；调用方负责保证至少留一个管理员。
+func (s *Store) SetAdmin(userID int64, admin bool) error {
+	_, err := s.db.Exec(`UPDATE users SET is_admin = ? WHERE id = ?`, boolInt(admin), userID)
+	return err
+}
+
+// AdminCount 返回管理员人数，用于阻止把最后一个管理员降级。
+func (s *Store) AdminCount() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE is_admin = 1`).Scan(&n)
+	return n, err
 }
 
 func (s *Store) CountUsers() (int, error) {
@@ -271,14 +348,13 @@ type AIConfig struct {
 	Model string `json:"model"`
 }
 
-const legacyAIConfigKey = "ai"
+// aiConfigKey 是全局模型配置的键：只有管理员能改，所有用户共用。
+const aiConfigKey = "ai"
 
-func aiConfigKey(userID int64) string { return fmt.Sprintf("ai:%d", userID) }
-
-// AIConfig 读取某个用户已保存的模型配置；没有配置过时返回 (nil, nil)。
-func (s *Store) AIConfig(userID int64) (*AIConfig, error) {
+// AIConfig 读取全局模型配置；没有配置过时返回 (nil, nil)。
+func (s *Store) AIConfig() (*AIConfig, error) {
 	var enc []byte
-	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, aiConfigKey(userID)).Scan(&enc)
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, aiConfigKey).Scan(&enc)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -296,8 +372,8 @@ func (s *Store) AIConfig(userID int64) (*AIConfig, error) {
 	return &cfg, nil
 }
 
-// SetAIConfig 加密保存某个用户的模型配置。
-func (s *Store) SetAIConfig(userID int64, cfg AIConfig) error {
+// SetAIConfig 加密保存全局模型配置。
+func (s *Store) SetAIConfig(cfg AIConfig) error {
 	plain, err := json.Marshal(cfg)
 	if err != nil {
 		return err
@@ -307,13 +383,13 @@ func (s *Store) SetAIConfig(userID int64, cfg AIConfig) error {
 		return err
 	}
 	_, err = s.db.Exec(`INSERT INTO settings(key, value) VALUES(?,?)
-		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, aiConfigKey(userID), enc)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, aiConfigKey, enc)
 	return err
 }
 
-// ClearAIConfig 删除某个用户的自定义配置，回退到环境变量。
-func (s *Store) ClearAIConfig(userID int64) error {
-	_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, aiConfigKey(userID))
+// ClearAIConfig 删除全局自定义配置，回退到环境变量。
+func (s *Store) ClearAIConfig() error {
+	_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, aiConfigKey)
 	return err
 }
 

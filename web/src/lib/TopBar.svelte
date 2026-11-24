@@ -26,6 +26,9 @@
       <a href="#/" class:on={route.name === 'overview' || route.name === 'task'}>概览</a>
       <a href="#/tasks" class:on={route.name === 'tasks'}>任务</a>
       <a href="#/settings" class:on={route.name === 'settings'}>设置</a>
+      {#if app.me?.isAdmin}
+        <a href="#/admin" class:on={route.name === 'admin'}>管理</a>
+      {/if}
     </nav>
     <span class="sp"></span>
 
@@ -54,6 +57,9 @@
           <span class="hint">本机账号</span>
         </div>
         <button class="item" onclick={() => nav('/settings')}>设置</button>
+        {#if app.me?.isAdmin}
+          <button class="item" onclick={() => nav('/admin')}>管理</button>
+        {/if}
         <button class="item danger" onclick={logout}>退出登录</button>
       </div>
     </div>

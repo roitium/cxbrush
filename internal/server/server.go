@@ -111,13 +111,17 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("POST /api/chaoxing/login", s.auth(s.handleChaoxingLogin))
 	s.mux.HandleFunc("PUT /api/chaoxing", s.auth(s.handleSetCookie))
-	s.mux.HandleFunc("GET /api/settings/ai", s.auth(s.handleGetAI))
-	s.mux.HandleFunc("PUT /api/settings/ai", s.auth(s.handleSetAI))
-	s.mux.HandleFunc("POST /api/settings/ai/test", s.auth(s.handleTestAI))
 	s.mux.HandleFunc("GET /api/settings/parallel", s.auth(s.handleGetParallel))
 	s.mux.HandleFunc("PUT /api/settings/parallel", s.auth(s.handleSetParallel))
 	s.mux.HandleFunc("GET /api/courses", s.auth(s.handleCourses))
 	s.mux.HandleFunc("GET /api/chapters", s.auth(s.handleChapters))
+
+	// 模型配置全局一份，只有管理员能读写。
+	s.mux.HandleFunc("GET /api/admin/ai", s.admin(s.handleGetAI))
+	s.mux.HandleFunc("PUT /api/admin/ai", s.admin(s.handleSetAI))
+	s.mux.HandleFunc("POST /api/admin/ai/test", s.admin(s.handleTestAI))
+	s.mux.HandleFunc("GET /api/admin/users", s.admin(s.handleAdminUsers))
+	s.mux.HandleFunc("POST /api/admin/users/{id}/admin", s.admin(s.handleSetUserAdmin))
 
 	s.mux.HandleFunc("GET /api/tasks", s.auth(s.handleTasks))
 	s.mux.HandleFunc("POST /api/tasks", s.auth(s.handleCreateTask))
@@ -155,6 +159,17 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), userKey{}, u)))
 	}
+}
+
+// admin 在 auth 的基础上要求管理员身份。
+func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
+	return s.auth(func(w http.ResponseWriter, r *http.Request) {
+		if u := userFrom(r); u == nil || !u.IsAdmin {
+			httpError(w, http.StatusForbidden, "仅管理员可访问")
+			return
+		}
+		next(w, r)
+	})
 }
 
 func (s *Server) newToken(uid int64) string {
@@ -275,7 +290,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	cookie, _ := s.st.Chaoxing(u.ID)
 	hasAI, aiModel := false, ""
-	if a, err := s.runner.Answerer(u.ID); err == nil && a != nil {
+	if a, err := s.runner.Answerer(); err == nil && a != nil {
 		hasAI, aiModel = true, a.Model
 	}
 	prefs, _ := s.st.Prefs(u.ID)
@@ -375,8 +390,7 @@ func (s *Server) checkAIBase(ctx context.Context, base string) error {
 }
 
 func (s *Server) handleGetAI(w http.ResponseWriter, r *http.Request) {
-	u := userFrom(r)
-	cfg, err := s.st.AIConfig(u.ID)
+	cfg, err := s.st.AIConfig()
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -403,7 +417,6 @@ func (s *Server) handleGetAI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetAI(w http.ResponseWriter, r *http.Request) {
-	u := userFrom(r)
 	var req struct {
 		Base  string `json:"base"`
 		Key   string `json:"key"`
@@ -414,7 +427,7 @@ func (s *Server) handleSetAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Clear {
-		if err := s.st.ClearAIConfig(u.ID); err != nil {
+		if err := s.st.ClearAIConfig(); err != nil {
 			httpError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -429,7 +442,7 @@ func (s *Server) handleSetAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if key == "" {
-		if old, err := s.st.AIConfig(u.ID); err == nil && old != nil {
+		if old, err := s.st.AIConfig(); err == nil && old != nil {
 			key = old.Key
 		}
 	}
@@ -442,7 +455,7 @@ func (s *Server) handleSetAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := store.AIConfig{Base: base, Key: key, Model: model}
-	if err := s.st.SetAIConfig(u.ID, cfg); err != nil {
+	if err := s.st.SetAIConfig(cfg); err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -450,7 +463,6 @@ func (s *Server) handleSetAI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTestAI(w http.ResponseWriter, r *http.Request) {
-	u := userFrom(r)
 	var req struct {
 		Base  string `json:"base"`
 		Key   string `json:"key"`
@@ -459,7 +471,7 @@ func (s *Server) handleTestAI(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	base, key, model := req.Base, req.Key, req.Model
-	if cfg, err := s.st.AIConfig(u.ID); err == nil && cfg != nil {
+	if cfg, err := s.st.AIConfig(); err == nil && cfg != nil {
 		base = firstNonEmpty(base, cfg.Base)
 		key = firstNonEmpty(key, cfg.Key)
 		model = firstNonEmpty(model, cfg.Model)
@@ -484,6 +496,68 @@ func (s *Server) handleTestAI(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------- 并行度 ----------
+
+// ---------- 管理员 ----------
+
+type adminUserView struct {
+	store.User
+	HasCookie bool `json:"hasCookie"`
+}
+
+func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := s.st.ListUsers()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	withCookie, _ := s.st.UsersWithCookies()
+	has := make(map[int64]bool, len(withCookie))
+	for _, id := range withCookie {
+		has[id] = true
+	}
+	out := make([]adminUserView, 0, len(users))
+	for _, u := range users {
+		out = append(out, adminUserView{User: u, HasCookie: has[u.ID]})
+	}
+	writeJSON(w, map[string]any{"users": out})
+}
+
+func (s *Server) handleSetUserAdmin(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		httpError(w, http.StatusBadRequest, "用户 ID 不合法")
+		return
+	}
+	var req struct {
+		Admin bool `json:"admin"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	target, err := s.st.UserByID(id)
+	if err != nil {
+		httpError(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	if !req.Admin && target.IsAdmin {
+		n, err := s.st.AdminCount()
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if n <= 1 {
+			httpError(w, http.StatusBadRequest, "至少要保留一个管理员")
+			return
+		}
+	}
+	if err := s.st.SetAdmin(id, req.Admin); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "user": adminUserView{User: store.User{
+		ID: target.ID, Username: target.Username, IsAdmin: req.Admin, CreatedAt: target.CreatedAt,
+	}}})
+}
 
 func (s *Server) handleGetParallel(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)

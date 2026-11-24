@@ -16,7 +16,7 @@
 
   async function load() {
     try {
-      const r = await api('/api/settings/ai')
+      const r = await api('/api/admin/ai')
       base = r.base || ''
       model = r.model || ''
       keyHint = r.keyHint || ''
@@ -40,16 +40,16 @@
     try {
       if (noKey) {
         // 没有自定义 Key：只验证当前生效的页面配置或环境变量。
-        const t = await api('/api/settings/ai/test', { method: 'POST', body: JSON.stringify({ base, model }) })
+        const t = await api('/api/admin/ai/test', { method: 'POST', body: JSON.stringify({ base, model }) })
         msg = `可用 · ${t.model} · ${t.latencyMs}ms（未保存）`
         cls = 'ok'
         return
       }
-      await api('/api/settings/ai', { method: 'PUT', body: JSON.stringify({ base, model, key }) })
+      await api('/api/admin/ai', { method: 'PUT', body: JSON.stringify({ base, model, key }) })
       key = ''
       let text = '已保存'
       if (test) {
-        const t = await api('/api/settings/ai/test', { method: 'POST', body: '{}' })
+        const t = await api('/api/admin/ai/test', { method: 'POST', body: '{}' })
         text = `可用 · ${t.model} · ${t.latencyMs}ms`
       }
       msg = text
@@ -67,7 +67,7 @@
   async function clear() {
     busy = true
     try {
-      await api('/api/settings/ai', { method: 'PUT', body: JSON.stringify({ clear: true }) })
+      await api('/api/admin/ai', { method: 'PUT', body: JSON.stringify({ clear: true }) })
       msg = '已清除自定义配置'
       cls = 'ok'
       await load()
@@ -85,7 +85,7 @@
 
 <section class="card">
   <div class="card-head">
-    <h2>答题模型</h2>
+    <h2>答题模型（全局）</h2>
     <span class="sp"></span>
     <span class="pill" class:done={source !== 'none' && (keyHint !== '' || source === 'env')}>
       <i class="dot"></i>{sourceText[source] || source}{model ? ` · ${model}` : ''}
@@ -93,7 +93,8 @@
   </div>
 
   <p class="hint intro">
-    支持任意 OpenAI 兼容的 <code>/chat/completions</code> 接口。Key 会用 AES-GCM 加密后存进本地数据库。
+    所有用户共用这一份配置和额度。支持任意 OpenAI 兼容的 <code>/chat/completions</code> 接口，
+    Key 会用 AES-GCM 加密后存进本地数据库。只有管理员能改。
   </p>
 
   <div class="form">

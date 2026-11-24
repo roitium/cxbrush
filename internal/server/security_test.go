@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -178,5 +179,65 @@ func TestClientIPTrustProxy(t *testing.T) {
 	yes := newTestServer(t, Options{TrustProxy: true})
 	if got := yes.clientIP(r); got != "203.0.113.9" {
 		t.Fatalf("信任代理时应取 XFF 首个地址，got %s", got)
+	}
+}
+
+func adminReq(t *testing.T, s *Server, uid int64, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var rd *strings.Reader
+	if body == "" {
+		rd = strings.NewReader("")
+	} else {
+		rd = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, rd)
+	req.RemoteAddr = "9.9.9.9:1234"
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: s.newToken(uid)})
+	rec := httptest.NewRecorder()
+	s.handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestAdminOnlyAIConfig(t *testing.T) {
+	s := newTestServer(t, Options{})
+	admin, err := s.st.CreateUser("boss", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := s.st.CreateUser("guest", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := adminReq(t, s, user.ID, http.MethodGet, "/api/admin/ai", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("普通用户访问模型配置应 403，got %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := adminReq(t, s, user.ID, http.MethodGet, "/api/admin/users", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("普通用户访问用户列表应 403，got %d", rec.Code)
+	}
+	if rec := adminReq(t, s, admin.ID, http.MethodGet, "/api/admin/ai", ""); rec.Code != http.StatusOK {
+		t.Fatalf("管理员应能读取模型配置，got %d %s", rec.Code, rec.Body.String())
+	}
+	// 内网地址即使管理员也不能存（默认不开 allow-private-ai）。
+	rec := adminReq(t, s, admin.ID, http.MethodPut, "/api/admin/ai",
+		`{"base":"https://127.0.0.1:11434/v1","model":"m","key":"k"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("内网模型地址应被拒绝，got %d %s", rec.Code, rec.Body.String())
+	}
+
+	if rec := adminReq(t, s, admin.ID, http.MethodGet, "/api/admin/users", ""); rec.Code != http.StatusOK {
+		t.Fatalf("管理员应能读用户列表，got %d", rec.Code)
+	}
+	// 最后一个管理员不能被降级。
+	rec = adminReq(t, s, admin.ID, http.MethodPost, fmt.Sprintf("/api/admin/users/%d/admin", admin.ID), `{"admin":false}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("不能移除最后一个管理员，got %d %s", rec.Code, rec.Body.String())
+	}
+	rec = adminReq(t, s, admin.ID, http.MethodPost, fmt.Sprintf("/api/admin/users/%d/admin", user.ID), `{"admin":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("应能把其他用户设为管理员，got %d %s", rec.Code, rec.Body.String())
+	}
+	if u, err := s.st.UserByID(user.ID); err != nil || !u.IsAdmin {
+		t.Fatalf("用户应已升为管理员：%+v %v", u, err)
 	}
 }

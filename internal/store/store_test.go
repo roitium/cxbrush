@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -185,49 +186,37 @@ func TestAIConfigRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	u, err := st.CreateUser("alice", "hash")
-	if err != nil {
-		t.Fatal(err)
-	}
-	u2, err := st.CreateUser("bob", "hash")
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	if cfg, err := st.AIConfig(u.ID); err != nil || cfg != nil {
+	if cfg, err := st.AIConfig(); err != nil || cfg != nil {
 		t.Fatalf("空库应返回 nil：%+v %v", cfg, err)
 	}
 	want := AIConfig{Base: "https://api.example.com/v1", Key: "sk-dummy-0000", Model: "deepseek/deepseek-flash"}
-	if err := st.SetAIConfig(u.ID, want); err != nil {
+	if err := st.SetAIConfig(want); err != nil {
 		t.Fatal(err)
 	}
-	got, err := st.AIConfig(u.ID)
+	got, err := st.AIConfig()
 	if err != nil || got == nil || *got != want {
 		t.Fatalf("AIConfig = %+v %v", got, err)
 	}
-	// 另一个用户看不到这份配置（Key 与费用各自独立）。
-	if cfg, err := st.AIConfig(u2.ID); err != nil || cfg != nil {
-		t.Fatalf("user2 不应读到 user1 的配置：%+v %v", cfg, err)
-	}
 	// Key 不能明文落库。
 	var enc []byte
-	if err := st.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, aiConfigKey(u.ID)).Scan(&enc); err != nil {
+	if err := st.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, aiConfigKey).Scan(&enc); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(enc, []byte("sk-dummy-0000")) {
 		t.Fatal("模型配置应该加密存储")
 	}
 
-	if err := st.ClearAIConfig(u.ID); err != nil {
+	if err := st.ClearAIConfig(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg, err := st.AIConfig(u.ID); err != nil || cfg != nil {
+	if cfg, err := st.AIConfig(); err != nil || cfg != nil {
 		t.Fatalf("清除后应返回 nil：%+v %v", cfg, err)
 	}
 }
 
-// 旧版全局配置在启动时应迁给第一个用户，而不是继续被所有人共用。
-func TestMigrateLegacyAIConfig(t *testing.T) {
+// 上一版是按用户存配置，升级后应把管理员（或最早用户）那份迁回全局键。
+func TestMigratePerUserAIConfig(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "data")
 	st, err := Open(dir)
 	if err != nil {
@@ -246,21 +235,55 @@ func TestMigrateLegacyAIConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.db.Exec(`INSERT INTO settings(key, value) VALUES(?,?)`, legacyAIConfigKey, enc); err != nil {
+	if _, err := st.db.Exec(`INSERT INTO settings(key, value) VALUES(?,?)`,
+		fmt.Sprintf("ai:%d", u.ID), enc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`INSERT INTO settings(key, value) VALUES(?,?)`,
+		fmt.Sprintf("ai:%d", u2.ID), enc); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.migrate(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg, err := st.AIConfig(u.ID); err != nil || cfg == nil || cfg.Key != "sk-legacy" {
-		t.Fatalf("旧配置应迁给第一个用户：%+v %v", cfg, err)
-	}
-	if cfg, err := st.AIConfig(u2.ID); err != nil || cfg != nil {
-		t.Fatalf("不应迁给第二个用户：%+v %v", cfg, err)
+	if cfg, err := st.AIConfig(); err != nil || cfg == nil || cfg.Key != "sk-legacy" {
+		t.Fatalf("旧配置应迁到全局键：%+v %v", cfg, err)
 	}
 	var n int
-	if err := st.db.QueryRow(`SELECT count(*) FROM settings WHERE key = ?`, legacyAIConfigKey).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("旧键应被删除，count=%d err=%v", n, err)
+	if err := st.db.QueryRow(`SELECT count(*) FROM settings WHERE key LIKE 'ai:%'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("用户级键应被删除，count=%d err=%v", n, err)
 	}
 	st.Close()
+}
+
+func TestFirstUserIsAdmin(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	u1, err := st.CreateUser("alice", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := st.CreateUser("bob", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !u1.IsAdmin || u2.IsAdmin {
+		t.Fatalf("只有第一个用户是管理员：%+v %+v", u1, u2)
+	}
+	if u, err := st.UserByID(u2.ID); err != nil || u.IsAdmin {
+		t.Fatalf("UserByID 应读回 is_admin：%+v %v", u, err)
+	}
+	if err := st.SetAdmin(u2.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	users, err := st.ListUsers()
+	if err != nil || len(users) != 2 || !users[1].IsAdmin {
+		t.Fatalf("ListUsers = %+v %v", users, err)
+	}
+	if n, err := st.AdminCount(); err != nil || n != 2 {
+		t.Fatalf("AdminCount = %d %v", n, err)
+	}
 }

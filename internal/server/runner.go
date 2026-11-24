@@ -34,18 +34,14 @@ type Runner struct {
 	dec     *cx.FontDecoder
 	decErr  error
 
-	aiMu     sync.Mutex
-	aiByUser map[int64]aiCacheEntry
+	aiMu   sync.Mutex
+	ai     *cx.AIAnswerer
+	aiHash string
 }
 
 type clientEntry struct {
 	hash string
 	c    *cx.Client
-}
-
-type aiCacheEntry struct {
-	ai   *cx.AIAnswerer
-	hash string
 }
 
 // NewRunner 创建任务调度器。workers 是全进程同时运行任务数的硬上限，
@@ -60,7 +56,6 @@ func NewRunner(st *store.Store, fontPath string, fontData []byte, workers int, a
 		cancels:        map[int64]context.CancelFunc{},
 		sem:            make(chan struct{}, clampWorkers(workers)),
 		gates:          map[int64]*userGate{},
-		aiByUser:       map[int64]aiCacheEntry{},
 	}
 }
 
@@ -216,10 +211,11 @@ func cookieHash(cookie string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (r *Runner) Answerer(userID int64) (*cx.AIAnswerer, error) {
-	// 配置来自当前用户（存 SQLite 并加密），环境变量由 NewAIAnswererWith 兜底。
+// Answerer 返回全局答题模型：配置由管理员在后台维护，所有用户共用一份。
+func (r *Runner) Answerer() (*cx.AIAnswerer, error) {
+	// 配置存 SQLite 并加密，环境变量由 NewAIAnswererWith 兜底。
 	var base, key, model string
-	if cfg, err := r.st.AIConfig(userID); err != nil {
+	if cfg, err := r.st.AIConfig(); err != nil {
 		return nil, fmt.Errorf("读取模型配置: %w", err)
 	} else if cfg != nil {
 		base, key, model = cfg.Base, cfg.Key, cfg.Model
@@ -229,14 +225,14 @@ func (r *Runner) Answerer(userID int64) (*cx.AIAnswerer, error) {
 
 	r.aiMu.Lock()
 	defer r.aiMu.Unlock()
-	if e, ok := r.aiByUser[userID]; ok && e.hash == hash && e.ai != nil {
-		return e.ai, nil
+	if r.ai != nil && r.aiHash == hash {
+		return r.ai, nil
 	}
 	a, err := cx.NewAIAnswererWithOptions(base, key, model, r.allowPrivateAI)
 	if err != nil {
 		return nil, err
 	}
-	r.aiByUser[userID] = aiCacheEntry{ai: a, hash: hash}
+	r.ai, r.aiHash = a, hash
 	return a, nil
 }
 
@@ -332,7 +328,7 @@ func (r *Runner) run(ctx context.Context, t *store.Task, videos int) {
 	}
 	opt := cx.RunOptions{
 		Concurrency: videos, DoDocs: true, DoReads: true, DoLive: t.DoLive, DoWorks: t.DoWorks,
-		Cache: cx.NewAnswerCache(r.st, t.UserID),
+		Cache: cx.NewAnswerCache(r.st),
 	}
 	if t.DoWorks {
 		dec, derr := r.Decoder()
@@ -340,7 +336,7 @@ func (r *Runner) run(ctx context.Context, t *store.Task, videos int) {
 			r.finish(t.ID, store.StatusFailed, "字体比对表不可用: "+derr.Error())
 			return
 		}
-		ai, aerr := r.Answerer(t.UserID)
+		ai, aerr := r.Answerer()
 		if aerr != nil {
 			r.finish(t.ID, store.StatusFailed, "答题模型不可用: "+aerr.Error())
 			return
