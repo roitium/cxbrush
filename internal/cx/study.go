@@ -210,11 +210,12 @@ type EvScan struct {
 }
 
 type EvQueued struct {
-	Videos, Docs, Reads, Skipped, Works int
+	Videos, Docs, Reads, Lives, Skipped, Works int
 }
 
 type EvProgress struct {
 	ID, Name  string
+	Kind      string // video / live
 	Chapter   string
 	Sec       int // 界面显示的进度
 	Confirmed int // 服务端已确认的进度
@@ -233,8 +234,8 @@ type EvTaskDone struct {
 }
 
 type EvFinished struct {
-	Passed, Failed, Docs, Reads int
-	Works                       int
+	Passed, Failed, Docs, Reads, Lives int
+	Works                              int
 }
 
 // EvWorkDone 是一个章节测验的作答结果。
@@ -254,6 +255,8 @@ type RunOptions struct {
 	DoDocs      bool
 	// DoReads 打开后，扫描到的专题阅读任务点会自动完成。
 	DoReads bool
+	// DoLive 打开后，扫描到的直播任务点会按真实时长上报观看进度。
+	DoLive bool
 	// DoWorks 打开后，扫描到的章节测验会自动抓题、还原字体、调用模型作答并提交。
 	DoWorks bool
 	// Answerer 是答题模型；DoWorks 时必须提供。
@@ -282,8 +285,9 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 	}
 
 	var queue []*Video
+	var liveQueue []*Live
 	var workQueue []*Work
-	skipped, docsDone, readsDone := 0, 0, 0
+	skipped, docsDone, readsDone, livesDone := 0, 0, 0, 0
 	for i, content := range contents {
 		ch := chapters[i]
 		if errs[i] != nil {
@@ -345,6 +349,19 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 				emit(EvTaskDone{ID: "read_" + r.JobID, Name: r.Name, Kind: "read", Chapter: r.ChapterID, Passed: reason == "", Reason: reason})
 			}
 		}
+		if opt.DoLive {
+			for _, l := range content.Lives {
+				if l == nil || l.IsPassed || !l.IsJob {
+					continue
+				}
+				if !l.Completable() {
+					skipped++
+					logf(true, "直播缺少必要参数（liveId/streamName），跳过：%s", l.Title)
+					continue
+				}
+				liveQueue = append(liveQueue, l)
+			}
+		}
 		if opt.DoWorks {
 			for _, w := range content.Works {
 				if w != nil && !w.IsPassed {
@@ -353,10 +370,10 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 			}
 		}
 		if content.Others > 0 {
-			logf(false, "[%s] 有 %d 个直播等未支持的任务点，已跳过", ch.Title, content.Others)
+			logf(false, "[%s] 有 %d 个暂未支持的任务点，已跳过", ch.Title, content.Others)
 		}
 	}
-	emit(EvQueued{Videos: len(queue), Docs: docsDone, Reads: readsDone, Skipped: skipped, Works: len(workQueue)})
+	emit(EvQueued{Videos: len(queue), Docs: docsDone, Reads: readsDone, Lives: livesDone + len(liveQueue), Skipped: skipped, Works: len(workQueue)})
 
 	var (
 		mu                    sync.Mutex
@@ -468,12 +485,53 @@ func (c *Client) Run(ctx context.Context, course Course, chapters []Chapter, opt
 			emit(EvTaskDone{ID: v.ID(), Name: v.Name, Kind: "video", Chapter: v.ChapterID, Passed: ok, Reason: reason})
 		}(v)
 	}
+	for _, l := range liveQueue {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func(l *Live) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			id := "live_" + l.JobID
+			logf(false, "[%s] 开始直播：%s，按真实时长上报", l.ChapterID, l.Title)
+			ok, err := c.WatchLive(ctx, l, func(p LiveProgress) {
+				emit(EvProgress{
+					ID: id, Name: l.Title, Kind: "live", Chapter: l.ChapterID,
+					Sec: p.Watched, Confirmed: p.Watched, Total: p.Total, Rate: 1, Status: p.Status,
+				})
+			})
+			if ctx.Err() != nil {
+				return
+			}
+			mu.Lock()
+			if ok {
+				passed++
+				livesDone++
+			} else {
+				failed++
+			}
+			mu.Unlock()
+			reason := ""
+			if err != nil {
+				reason = err.Error()
+				logf(true, "[%s] 直播 %s 未完成：%v", l.ChapterID, l.Title, err)
+			} else {
+				logf(false, "📺 已完成直播：%s", l.Title)
+			}
+			emit(EvTaskDone{ID: id, Name: l.Title, Kind: "live", Chapter: l.ChapterID, Passed: ok, Reason: reason})
+		}(l)
+	}
 	wg.Wait()
 	if ctx.Err() == nil {
 		mu.Lock()
-		worksDone := works
+		worksDone, lives := works, livesDone
 		mu.Unlock()
-		emit(EvFinished{Passed: passed, Failed: failed, Docs: docsDone, Reads: readsDone, Works: worksDone})
+		emit(EvFinished{Passed: passed, Failed: failed, Docs: docsDone, Reads: readsDone, Lives: lives, Works: worksDone})
 	}
 }
 
@@ -498,7 +556,7 @@ func (c *Client) watchVideo(ctx context.Context, v *Video, emit func(Event)) (bo
 	interval := min(60, max(15, v.ReportInterval))
 	rate := v.MaxRate()
 	prog := func(sec, countdown int, status string) {
-		emit(EvProgress{ID: v.ID(), Name: v.Name, Chapter: v.ChapterID, Sec: sec, Confirmed: reported, Total: clipEnd, Rate: rate, Countdown: countdown, Status: status})
+		emit(EvProgress{ID: v.ID(), Name: v.Name, Kind: "video", Chapter: v.ChapterID, Sec: sec, Confirmed: reported, Total: clipEnd, Rate: rate, Countdown: countdown, Status: status})
 	}
 
 	// 遇到 403 就按 restTime（默认 60 秒）休息，然后从当前位置重新发起播。

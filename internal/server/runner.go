@@ -323,7 +323,7 @@ func (r *Runner) run(ctx context.Context, t *store.Task, videos int) {
 		r.finish(t.ID, store.StatusFailed, err.Error())
 		return
 	}
-	opt := cx.RunOptions{Concurrency: videos, DoDocs: true, DoReads: true, DoWorks: t.DoWorks}
+	opt := cx.RunOptions{Concurrency: videos, DoDocs: true, DoReads: true, DoLive: t.DoLive, DoWorks: t.DoWorks}
 	if t.DoWorks {
 		dec, derr := r.Decoder()
 		if derr != nil {
@@ -356,7 +356,7 @@ func (r *Runner) run(ctx context.Context, t *store.Task, videos int) {
 		defer close(drained)
 		for e := range out {
 			if f, ok := e.(cx.EvFinished); ok {
-				summary = fmt.Sprintf("通过 %d，失败 %d，文档 %d，阅读 %d，测验 %d", f.Passed, f.Failed, f.Docs, f.Reads, f.Works)
+				summary = fmt.Sprintf("通过 %d，失败 %d，文档 %d，阅读 %d，直播 %d，测验 %d", f.Passed, f.Failed, f.Docs, f.Reads, f.Lives, f.Works)
 			}
 			kind, data := eventPayload(e)
 			_ = r.st.AddEvent(t.ID, kind, data)
@@ -384,11 +384,11 @@ func eventPayload(e cx.Event) (string, any) {
 	case cx.EvScan:
 		return "scan", map[string]any{"done": v.Done, "total": v.Total}
 	case cx.EvQueued:
-		return "queued", map[string]any{"videos": v.Videos, "docs": v.Docs, "reads": v.Reads, "skipped": v.Skipped, "works": v.Works}
+		return "queued", map[string]any{"videos": v.Videos, "docs": v.Docs, "reads": v.Reads, "lives": v.Lives, "skipped": v.Skipped, "works": v.Works}
 	case cx.EvProgress:
 		return "progress", map[string]any{
 			"id": v.ID, "name": v.Name, "chapter": v.Chapter, "sec": v.Sec, "confirmed": v.Confirmed,
-			"total": v.Total, "rate": v.Rate, "status": v.Status,
+			"kind": v.Kind, "total": v.Total, "rate": v.Rate, "status": v.Status,
 		}
 	case cx.EvTaskDone:
 		return "task", map[string]any{"id": v.ID, "name": v.Name, "kind": v.Kind, "chapter": v.Chapter, "passed": v.Passed, "reason": v.Reason}
@@ -399,7 +399,7 @@ func eventPayload(e cx.Event) (string, any) {
 			"score": v.Score, "correct": v.Correct, "wrong": v.Wrong,
 		}
 	case cx.EvFinished:
-		return "finished", map[string]any{"passed": v.Passed, "failed": v.Failed, "docs": v.Docs, "reads": v.Reads, "works": v.Works}
+		return "finished", map[string]any{"passed": v.Passed, "failed": v.Failed, "docs": v.Docs, "reads": v.Reads, "lives": v.Lives, "works": v.Works}
 	}
 	return "unknown", map[string]any{"value": fmt.Sprintf("%v", e)}
 }

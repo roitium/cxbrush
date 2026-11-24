@@ -2,10 +2,51 @@ package store
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestMigrateAddsDoLive(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "cxbrush.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`CREATE TABLE tasks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+		course_id INTEGER NOT NULL, class_id INTEGER NOT NULL, cpi INTEGER NOT NULL,
+		course_name TEXT NOT NULL, chapters TEXT NOT NULL, do_works INTEGER NOT NULL,
+		status TEXT NOT NULL, message TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`)
+	legacy.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	u, err := st.CreateUser("bob", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &Task{UserID: u.ID, CourseID: 1, ClassID: 2, CPI: 3, CourseName: "c", DoLive: true}
+	if err := st.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := st.Task(task.ID)
+	if err != nil || !loaded.DoLive {
+		t.Fatalf("loaded = %+v, err = %v", loaded, err)
+	}
+}
 
 func TestStoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -50,6 +91,7 @@ func TestStoreRoundTrip(t *testing.T) {
 		UserID: u.ID, CourseID: 1, ClassID: 2, CPI: 3, CourseName: "c",
 		Chapters: []ChapterRef{{ID: "10", Title: "t1"}, {ID: "11", Title: "t2"}},
 		DoWorks:  true,
+		DoLive:   true,
 	}
 	if err := st.CreateTask(task); err != nil {
 		t.Fatal(err)
@@ -58,7 +100,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.Chapters) != 2 || !loaded.DoWorks || loaded.Status != StatusQueued {
+	if len(loaded.Chapters) != 2 || !loaded.DoWorks || !loaded.DoLive || loaded.Status != StatusQueued {
 		t.Fatalf("task = %+v", loaded)
 	}
 

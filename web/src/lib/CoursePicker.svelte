@@ -10,6 +10,7 @@
   let loading = $state(false)
   let error = $state('')
   let doWorks = $state(true)
+  let doLive = $state(true)
   let starting = $state(false)
   let manual = $state(false)
   let picked = $state(false)
@@ -104,7 +105,7 @@
     starting = true
     error = ''
     try {
-      await onStart(course, chosen, doWorks)
+      await onStart(course, chosen, doWorks, doLive)
     } catch (e) {
       error = e.message
     } finally {
@@ -128,7 +129,15 @@
       <input type="checkbox" bind:checked={doWorks} />
       <span>
         <b>自动做章节测验</b>
-        <small>{doWorks ? (hasAI ? 'AI 作答并提交' : '未配置模型，会跳过') : '只刷视频、文档和阅读'}</small>
+        <small>{doWorks ? (hasAI ? 'AI 作答并提交' : '未配置模型，会跳过') : '不自动作答章节测验'}</small>
+      </span>
+    </label>
+
+    <label class="switch" class:off={!doLive}>
+      <input type="checkbox" bind:checked={doLive} />
+      <span>
+        <b>自动完成直播</b>
+        <small>{doLive ? '按真实时长上报，可能挂很久' : '跳过直播任务点'}</small>
       </span>
     </label>
 

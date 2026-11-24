@@ -45,7 +45,7 @@
     return '上次任务'
   })
 
-  async function start(course, chapters, doWorks) {
+  async function start(course, chapters, doWorks, doLive) {
     const r = await api('/api/tasks', {
       method: 'POST',
       body: JSON.stringify({
@@ -55,6 +55,7 @@
         courseName: course.name,
         chapters: chapters.map((c) => ({ id: c.id, title: c.title })),
         doWorks,
+        doLive,
       }),
     })
     await loadTasks()

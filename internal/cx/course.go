@@ -136,12 +136,31 @@ func (r *Read) Completable() bool {
 	return r.IsJob && !r.IsPassed && r.JobID != "" && r.JToken != ""
 }
 
+// Live 是 cards 里的一个直播任务点（insertlive）。完成需要按真实时长上报。
+type Live struct {
+	CourseID, ClassID int64
+	ChapterID         string
+	UserID            string
+	JobID, LiveID     string
+	StreamName, Vdoid string
+	Title             string
+	RT                float64
+	LiveSetEnc        string
+	AuthEnc           string
+	IsJob, IsPassed   bool
+}
+
+func (l *Live) Completable() bool {
+	return l.IsJob && !l.IsPassed && l.JobID != "" && l.LiveID != "" && l.StreamName != ""
+}
+
 type ChapterContent struct {
 	Videos []*Video
 	Docs   []*Document
 	Reads  []*Read
+	Lives  []*Live
 	Works  []*Work
-	// Others 为直播等本 POC 不处理的任务点数量。
+	// Others 为暂未支持的任务点数量。
 	Others int
 }
 
@@ -331,7 +350,7 @@ func (c *Client) ChapterContent(ctx context.Context, course *Course, ch *Chapter
 	}
 
 	content := &ChapterContent{}
-	seenVideo, seenDoc, seenRead, seenWork := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
+	seenVideo, seenDoc, seenRead, seenLive, seenWork := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	var lastErr error
 	okTabs := 0
 	for num := 0; num < cardCount; num++ {
@@ -368,6 +387,12 @@ func (c *Client) ChapterContent(ctx context.Context, course *Course, ch *Chapter
 			if !seenRead[r.JobID] {
 				seenRead[r.JobID] = true
 				content.Reads = append(content.Reads, r)
+			}
+		}
+		for _, l := range tab.Lives {
+			if !seenLive[l.JobID] {
+				seenLive[l.JobID] = true
+				content.Lives = append(content.Lives, l)
 			}
 		}
 		for _, w := range tab.Works {
@@ -510,6 +535,30 @@ func parseCards(html string, course *Course, chapterID string) *ChapterContent {
 				MicroTopicID: strv(item["microTopicId"]),
 				Name:         strings.TrimSpace(name),
 				IsJob:        isJob, IsPassed: done,
+			})
+		case typ == "live" || module == "insertlive":
+			// insertlive：有 jobid 但 job 缺失或为 false，表示已完成。
+			done := passed
+			if !hasPassed {
+				done = jobID != "" && !jobFlag
+			}
+			name := firstNonEmpty(strv(prop["title"]), strv(prop["name"]), "直播任务点")
+			liveID := strv(prop["liveId"])
+			if liveID == "" && strings.HasPrefix(jobID, "live-") {
+				liveID = strings.TrimPrefix(jobID, "live-")
+			}
+			out.Lives = append(out.Lives, &Live{
+				CourseID: course.CourseID, ClassID: course.ClassID, ChapterID: chapterID,
+				UserID:     userID,
+				JobID:      jobID,
+				LiveID:     liveID,
+				StreamName: strv(prop["streamName"]),
+				Vdoid:      strv(prop["vdoid"]),
+				Title:      strings.TrimSpace(name),
+				RT:         floatv(item["rt"], floatv(prop["rt"], 0.9)),
+				LiveSetEnc: strv(item["liveSetEnc"]),
+				AuthEnc:    strv(item["authEnc"]),
+				IsJob:      isJob, IsPassed: done,
 			})
 		case typ == "workid" || module == "work":
 			workID := strv(prop["workid"])

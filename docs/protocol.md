@@ -238,6 +238,38 @@ GET /mooc-ans/job/readv2
 只是阅读时长统计（“当天阅读时长，次日更新”），**不是**任务点完成条件，可以忽略。
 Go 侧见 `CompleteRead`，扫描到 `Read.Completable()` 的任务点会直接调用该接口。
 
+### 直播任务点（2026-11 调研）
+
+cards 里是 `module=insertlive`，附件包含 `liveSetEnc` / `authEnc` / `liveId` / `streamName` / `vdoid`，
+`job:true` 表示未完成。和视频一样，进度以平台为准：
+
+```
+GET /ananas/live/liveinfo?liveid=&userid=&clazzid=&knowledgeid=&courseid=&jobid=&ut=s
+→ temp.data: duration(秒) / timeLong(毫秒) / timeLongValue(分钟) / percentValue / liveStatus / ifReview
+```
+
+- `liveStatus=0`：未开始，跳过；
+- `liveStatus=4 && ifReview=1`：已结束且**不允许回放**，无法完成；
+- `liveStatus=4 && ifReview=0`：已结束可回放；
+- `liveStatus=1`：正在直播。
+
+完成方式是每 60 秒上报一次观看时长（与网页播放器一致）：
+
+```
+GET https://zhibo.chaoxing.com/saveTimePc?streamName=&vdoid=&userId=&isStart=0|1&t=<毫秒>&courseId=
+→ @success
+```
+
+第一次上报前先打开一次
+`https://zhibo.chaoxing.com/{liveId}?courseId=…&classId=…&knowledgeId=…&jobId=…&userId=…&rt=0.9&livesetenc=…&isjob=true&watchingInCourse=1&customPara1=<classId>_<courseId>&customPara2=<authEnc>&isNotDrag=1&jobfs=0`
+让 `zhibo.chaoxing.com` 建立会话。之后用 `liveinfo` 的 `percentValue` 判断是否达到 `rt`（默认 90%），
+不要用本地计数推断完成。直播是**真实时间**的，没有可靠的一次性完成接口。
+
+参考实现：[bashijiuhou/cx-study-assistant](https://github.com/bashijiuhou/cx-study-assistant)、
+[Kerxs/XueXiTong-Plus](https://github.com/Kerxs/XueXiTong-Plus)（作者用 59/42 分钟真实回放验证过）、
+[yatori-dev/yatori-go-core](https://github.com/yatori-dev/yatori-go-core)。旧项目里的
+`zhibo.chaoxing.com/live/saveCourseJob?token=` 一次性完成已不可靠。
+
 ### 解析策略（为什么不怕改版）
 
 题目解析只认「提交时真正用到的字段」，CSS class 只用来辅助切分文字：
@@ -330,6 +362,7 @@ cd web && pnpm dev                      # 调试用，/api 自动代理到 127.0
 - `internal/cx/font.go`：字体提取、字形比对
 - `internal/cx/course.go`：`ChapterContent.Works` 从 cards 收集 work
 - `internal/cx/study.go`：`CompleteRead` 调用 `/mooc-ans/job/readv2` 完成专题阅读任务点
+- `internal/cx/live.go`：直播状态查询、`saveTimePc` 上报与按平台进度收尾
 - `internal/cx/ai.go`：模型作答（OpenAI 兼容 / `response_format=json_object`）
 - `internal/cx/solve.go`：抓题 → 解密 → 作答 → 提交 的完整流程
 - `internal/cx/review.go`：提交后回查批阅页（成绩、对错题数）

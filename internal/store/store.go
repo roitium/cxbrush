@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -98,6 +99,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   course_name TEXT NOT NULL,
   chapters    TEXT NOT NULL,
   do_works    INTEGER NOT NULL,
+  do_live     INTEGER NOT NULL DEFAULT 1,
   status      TEXT NOT NULL,
   message     TEXT NOT NULL DEFAULT '',
   created_at  INTEGER NOT NULL,
@@ -125,8 +127,15 @@ CREATE TABLE IF NOT EXISTS prefs (
 `
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// 旧库补列：SQLite 的 ADD COLUMN 没有 IF NOT EXISTS。
+	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN do_live INTEGER NOT NULL DEFAULT 1`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	return nil
 }
 
 type User struct {
@@ -354,6 +363,7 @@ type Task struct {
 	CourseName string       `json:"courseName"`
 	Chapters   []ChapterRef `json:"chapters"`
 	DoWorks    bool         `json:"doWorks"`
+	DoLive     bool         `json:"doLive"`
 	Status     string       `json:"status"`
 	Message    string       `json:"message,omitempty"`
 	CreatedAt  time.Time    `json:"createdAt"`
@@ -379,9 +389,9 @@ func (s *Store) CreateTask(t *Task) error {
 		t.Status = StatusQueued
 	}
 	chapters, _ := json.Marshal(t.Chapters)
-	res, err := s.db.Exec(`INSERT INTO tasks(user_id, course_id, class_id, cpi, course_name, chapters, do_works, status, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		t.UserID, t.CourseID, t.ClassID, t.CPI, t.CourseName, string(chapters), boolInt(t.DoWorks), t.Status, now.Unix(), now.Unix())
+	res, err := s.db.Exec(`INSERT INTO tasks(user_id, course_id, class_id, cpi, course_name, chapters, do_works, do_live, status, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		t.UserID, t.CourseID, t.ClassID, t.CPI, t.CourseName, string(chapters), boolInt(t.DoWorks), boolInt(t.DoLive), t.Status, now.Unix(), now.Unix())
 	if err != nil {
 		return err
 	}
@@ -402,21 +412,22 @@ func (s *Store) UpdateTask(id int64, status, message string) error {
 	return err
 }
 
-const taskCols = `id, user_id, course_id, class_id, cpi, course_name, chapters, do_works, status, message, created_at, updated_at`
+const taskCols = `id, user_id, course_id, class_id, cpi, course_name, chapters, do_works, do_live, status, message, created_at, updated_at`
 
 type scanner interface{ Scan(...any) error }
 
 func scanTask(sc scanner) (*Task, error) {
 	var t Task
 	var chapters, status, message string
-	var doWorks int
+	var doWorks, doLive int
 	var created, updated int64
 	if err := sc.Scan(&t.ID, &t.UserID, &t.CourseID, &t.ClassID, &t.CPI, &t.CourseName,
-		&chapters, &doWorks, &status, &message, &created, &updated); err != nil {
+		&chapters, &doWorks, &doLive, &status, &message, &created, &updated); err != nil {
 		return nil, err
 	}
 	t.Chapters = decodeChapters(chapters)
 	t.DoWorks = doWorks == 1
+	t.DoLive = doLive == 1
 	t.Status = status
 	t.Message = message
 	t.CreatedAt = time.Unix(created, 0)

@@ -556,6 +556,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		CourseName string             `json:"courseName"`
 		Chapters   []store.ChapterRef `json:"chapters"`
 		DoWorks    bool               `json:"doWorks"`
+		DoLive     bool               `json:"doLive"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -567,7 +568,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	t := &store.Task{
 		UserID: u.ID, CourseID: req.CourseID, ClassID: req.ClassID, CPI: req.CPI,
-		CourseName: req.CourseName, Chapters: req.Chapters, DoWorks: req.DoWorks,
+		CourseName: req.CourseName, Chapters: req.Chapters, DoWorks: req.DoWorks, DoLive: req.DoLive,
 	}
 	if err := s.st.CreateTask(t); err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
@@ -656,6 +657,7 @@ func foldEvent(out *[]ItemView, idx map[string]int, e store.Event) {
 		var d struct {
 			ID        string
 			Name      string
+			Kind      string
 			Chapter   string
 			Confirmed int
 			Total     int
@@ -663,8 +665,12 @@ func foldEvent(out *[]ItemView, idx map[string]int, e store.Event) {
 		if json.Unmarshal(e.Data, &d) != nil || d.ID == "" {
 			return
 		}
+		kind := d.Kind
+		if kind == "" {
+			kind = "video"
+		}
 		upsertItem(out, idx, ItemView{
-			ID: d.ID, Kind: "video", Chapter: d.Chapter, Name: d.Name,
+			ID: d.ID, Kind: kind, Chapter: d.Chapter, Name: d.Name,
 			State: "running", Cur: d.Confirmed, Total: d.Total,
 		})
 	case "task":
@@ -768,7 +774,7 @@ func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 	}
 	clone := &store.Task{
 		UserID: t.UserID, CourseID: t.CourseID, ClassID: t.ClassID, CPI: t.CPI,
-		CourseName: t.CourseName, Chapters: t.Chapters, DoWorks: t.DoWorks,
+		CourseName: t.CourseName, Chapters: t.Chapters, DoWorks: t.DoWorks, DoLive: t.DoLive,
 	}
 	if err := s.st.CreateTask(clone); err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
