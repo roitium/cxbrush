@@ -104,6 +104,16 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatalf("task = %+v", loaded)
 	}
 
+	if err := st.PutAnswer("k1", `{"free":["北京"]}`); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := st.GetAnswer("k1"); !ok || v != `{"free":["北京"]}` {
+		t.Fatalf("answer cache = %q %v", v, ok)
+	}
+	if _, ok := st.GetAnswer("missing"); ok {
+		t.Fatal("missing key should not exist")
+	}
+
 	if err := st.AddEvent(task.ID, "log", map[string]any{"text": "hi"}); err != nil {
 		t.Fatal(err)
 	}

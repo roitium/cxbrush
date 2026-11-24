@@ -11,7 +11,7 @@
 - 视频按合法倍速上报进度，文档/阅读任务点自动完成，直播按真实时长上报，章节测验自动作答并提交。
 - 答题页内联字体还原（Noto Sans CJK 向量比对），解析失败时整块明文交给模型兜底。
 - 模型走任意 OpenAI 兼容接口：在页面「模型配置」里填地址/Key/模型名，也可以用 `CX_AI_*` 环境变量。
-- 题目答案缓存：按「题型 + 题干 + 选项正文」保存模型答过的题，再遇到直接复用，不再请求模型。
+- 题目答案缓存：按「题型 + 题干 + 选项正文」把模型答过的题存进 SQLite，再遇到直接复用，不再请求模型。
 - Web 版多用户：每个用户独立 Cookie，任务/事件/进度落 SQLite，SSE 实时推送。
 - 单文件二进制：前端构建产物和比对字体都 embed，运行时只依赖数据目录。
 
@@ -65,8 +65,8 @@ mise run build        # 等价于 cd web && pnpm build && go build -o cxbrush ./
 **字体**：默认使用 `internal/assets/NotoSansCJKsc-DemiLight.otf`（已 embed）。
 需要用别的字体做对照时，设置 `CX_REF_FONT=/path/to/font.otf` 即可。
 
-**数据目录**：默认 `~/.local/share/cxbrush`，包含 `cxbrush.db`、`secret.key`（0600）、
-`answers.json`（题目答案缓存）和运行日志。`secret.key` 丢了 Cookie 和模型 Key 就解不开。
+**数据目录**：默认 `~/.local/share/cxbrush`，包含 `cxbrush.db`（答案缓存在 `answer_cache` 表）、
+`secret.key`（0600）和运行日志。`secret.key` 丢了 Cookie 和模型 Key 就解不开。
 
 ## 目录结构
 

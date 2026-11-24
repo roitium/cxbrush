@@ -14,7 +14,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -50,11 +49,7 @@ type Server struct {
 func New(st *store.Store, opts Options) *Server {
 	s := &Server{st: st, key: st.Key(), opt: opts, mux: http.NewServeMux()}
 	s.runner = NewRunner(st, opts.FontPath, opts.FontData, opts.Workers)
-	cachePath := ""
-	if opts.DataDir != "" {
-		cachePath = filepath.Join(opts.DataDir, "answers.json")
-	}
-	s.runner.SetAnswerCache(cx.NewAnswerCache(cachePath))
+	s.runner.SetAnswerCache(cx.NewAnswerCache(s.st))
 	s.routes()
 	return s
 }

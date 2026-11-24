@@ -4,8 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -21,33 +19,32 @@ type cacheEntry struct {
 	Updated int64    `json:"updated,omitempty"`
 }
 
-type cacheFile struct {
-	Version int                   `json:"version"`
-	Entries map[string]cacheEntry `json:"entries"`
+// AnswerStore 是答案缓存的持久层。key 是题目指纹，value 是 cacheEntry 的 JSON。
+// 生产环境用 SQLite 实现；测试可以用内存实现。
+type AnswerStore interface {
+	GetAnswer(key string) (string, bool)
+	PutAnswer(key, value string) error
 }
 
 // AnswerCache 是可持久化的题目答案缓存；nil 表示不启用。
+// store 为 nil 时退化为进程内内存缓存。
 type AnswerCache struct {
-	mu      sync.Mutex
-	path    string
-	entries map[string]cacheEntry
+	mu    sync.Mutex
+	store AnswerStore
+	mem   map[string]cacheEntry
 }
 
-// NewAnswerCache 从 path 读取缓存；文件不存在或损坏时返回空缓存。
-func NewAnswerCache(path string) *AnswerCache {
-	c := &AnswerCache{path: path, entries: map[string]cacheEntry{}}
-	if path == "" {
-		return c
+// NewAnswerCache 用持久层构造缓存；store 为 nil 时等价于内存缓存。
+func NewAnswerCache(store AnswerStore) *AnswerCache {
+	if store == nil {
+		return NewMemoryAnswerCache()
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return c
-	}
-	var f cacheFile
-	if json.Unmarshal(data, &f) == nil && f.Entries != nil {
-		c.entries = f.Entries
-	}
-	return c
+	return &AnswerCache{store: store}
+}
+
+// NewMemoryAnswerCache 构造只存在于当前进程的缓存（测试用）。
+func NewMemoryAnswerCache() *AnswerCache {
+	return &AnswerCache{mem: map[string]cacheEntry{}}
 }
 
 func normText(s string) string {
@@ -75,13 +72,10 @@ func (c *AnswerCache) Lookup(qs []*Question) (map[string][]string, []*Question) 
 	if c == nil {
 		return nil, qs
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	answers := map[string][]string{}
 	var misses []*Question
-	for i := range qs {
-		q := qs[i]
-		e, ok := c.entries[questionCacheKey(q)]
+	for _, q := range qs {
+		e, ok := c.get(questionCacheKey(q))
 		if !ok {
 			misses = append(misses, q)
 			continue
@@ -97,6 +91,24 @@ func (c *AnswerCache) Lookup(qs []*Question) (map[string][]string, []*Question) 
 		answers = nil
 	}
 	return answers, misses
+}
+
+func (c *AnswerCache) get(key string) (cacheEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.store == nil {
+		e, ok := c.mem[key]
+		return e, ok
+	}
+	raw, ok := c.store.GetAnswer(key)
+	if !ok {
+		return cacheEntry{}, false
+	}
+	var e cacheEntry
+	if json.Unmarshal([]byte(raw), &e) != nil {
+		return cacheEntry{}, false
+	}
+	return e, true
 }
 
 func resolveCacheEntry(q *Question, e cacheEntry) ([]string, bool) {
@@ -155,55 +167,15 @@ func (c *AnswerCache) Put(q *Question, values []string) {
 		}
 	}
 	key := questionCacheKey(q)
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[key] = e
-	c.saveLocked()
-}
-
-// Len 返回缓存条目数（测试与诊断用）。
-func (c *AnswerCache) Len() int {
-	if c == nil {
-		return 0
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.entries)
-}
-
-func (c *AnswerCache) saveLocked() {
-	if c.path == "" {
+	if c.store == nil {
+		c.mem[key] = e
 		return
 	}
-	data, err := json.Marshal(cacheFile{Version: 1, Entries: c.entries})
+	raw, err := json.Marshal(e)
 	if err != nil {
 		return
 	}
-	dir := filepath.Dir(c.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return
-	}
-	tmp, err := os.CreateTemp(dir, ".answers-*.json")
-	if err != nil {
-		return
-	}
-	name := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(name)
-		return
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		os.Remove(name)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(name)
-		return
-	}
-	if err := os.Rename(name, c.path); err != nil {
-		os.Remove(name)
-	}
+	_ = c.store.PutAnswer(key, string(raw))
 }

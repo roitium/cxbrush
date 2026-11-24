@@ -124,6 +124,11 @@ CREATE TABLE IF NOT EXISTS prefs (
   videos     INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS answer_cache (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `
 
 func (s *Store) migrate() error {
@@ -346,6 +351,23 @@ func (s *Store) SetPrefs(userID int64, p Prefs) error {
 	_, err := s.db.Exec(`INSERT INTO prefs(user_id, tasks, videos, updated_at) VALUES(?,?,?,?)
 		ON CONFLICT(user_id) DO UPDATE SET tasks=excluded.tasks, videos=excluded.videos, updated_at=excluded.updated_at`,
 		userID, p.Tasks, p.Videos, time.Now().Unix())
+	return err
+}
+
+// GetAnswer 读取一条题目答案缓存。
+func (s *Store) GetAnswer(key string) (string, bool) {
+	var value string
+	if err := s.db.QueryRow(`SELECT value FROM answer_cache WHERE key = ?`, key).Scan(&value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+// PutAnswer 写入一条题目答案缓存（按题目指纹覆盖）。
+func (s *Store) PutAnswer(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO answer_cache(key, value, updated_at) VALUES(?,?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+		key, value, time.Now().Unix())
 	return err
 }
 
