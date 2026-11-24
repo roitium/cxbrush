@@ -1,0 +1,6 @@
+fonttools
+pillow
+numpy
+beautifulsoup4
+lxml
+requests

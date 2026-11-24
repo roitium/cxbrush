@@ -1,0 +1,27 @@
+:root{
+  --bg:#0f1115; --card:#171a21; --line:#252a33; --fg:#e6e8ee; --dim:#8b93a1;
+  --acc:#4c8dff; --ok:#3fb950; --err:#f85149; --warn:#d29922;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg)}
+body{font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+a{color:var(--acc)}
+h1,h2,h3{margin:0}
+button{font:inherit;color:var(--fg);background:#20252e;border:1px solid var(--line);border-radius:8px;padding:8px 14px;cursor:pointer}
+button:hover{border-color:#39414f}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+button.primary:hover{filter:brightness(1.08)}
+button.ghost{background:transparent}
+button.link{border:0;background:none;padding:0;color:var(--acc)}
+button:disabled{opacity:.5;cursor:not-allowed}
+input,select,textarea{font:inherit;color:var(--fg);background:#0e1116;border:1px solid var(--line);border-radius:8px;padding:8px 10px;outline:none;width:100%}
+input:focus,select:focus,textarea:focus{border-color:var(--acc)}
+textarea{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;resize:vertical}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.card h2{font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);margin-bottom:12px}
+.hint{font-size:12px;color:var(--dim)}
+.err{color:var(--err)}
+.ok{color:var(--ok)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.stack{display:grid;gap:12px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}

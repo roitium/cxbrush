@@ -1,0 +1,17 @@
+.DS_Store
+
+# 构建产物 / 日志
+/cxbrush
+*.log
+*.test
+
+# Go
+/data/
+
+# 前端
+web/node_modules/
+
+# 归档 POC 的运行产物
+.venv/
+__pycache__/
+*.pyc
