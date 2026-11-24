@@ -35,6 +35,8 @@ type Options struct {
 	FontPath  string
 	FontData  []byte
 	AllowOpen bool // 允许任何人注册（否则只在没有任何用户时允许注册第一个）
+	Workers   int  // 同时运行的任务数
+	Videos    int  // 单个任务内同时上报的视频数
 }
 
 type Server struct {
@@ -47,7 +49,7 @@ type Server struct {
 
 func New(st *store.Store, opts Options) *Server {
 	s := &Server{st: st, key: st.Key(), opt: opts, mux: http.NewServeMux()}
-	s.runner = NewRunner(st, opts.FontPath, opts.FontData)
+	s.runner = NewRunner(st, opts.FontPath, opts.FontData, opts.Workers, opts.Videos)
 	s.routes()
 	return s
 }
@@ -245,8 +247,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	if a, err := s.runner.Answerer(); err == nil && a != nil {
 		hasAI, aiModel = true, a.Model
 	}
+	workers, videos := s.runner.Parallelism()
 	writeJSON(w, map[string]any{
 		"user": u, "hasCookie": cookie != "", "hasAI": hasAI, "aiModel": aiModel,
+		"parallel": map[string]int{"tasks": workers, "videos": videos},
 	})
 }
 

@@ -27,7 +27,16 @@ mise run build        # 等价于 cd web && pnpm build && go build -o cxbrush ./
 ./cxbrush -addr 127.0.0.1:8080 -data ~/.local/share/cxbrush
 ```
 
-只有三个启动参数：`-addr`（监听地址）、`-data`（数据目录）、`-open`（允许任何人注册）。
+启动参数：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-addr` | `127.0.0.1:8080` | 监听地址 |
+| `-data` | `~/.local/share/cxbrush` | 数据目录 |
+| `-open` | `false` | 允许任何人注册（默认只有第一个用户能注册） |
+| `-workers` | `2` | 同时运行的任务数（1-16，全进程共享） |
+| `-videos` | `2` | 单个任务内同时上报的视频数（1-16） |
+
 学习通账号、模型 Key 等都在页面里配置。
 
 首次运行 Web 版时第一个注册的用户直接生效，之后默认关闭注册（`-open` 可放开）。

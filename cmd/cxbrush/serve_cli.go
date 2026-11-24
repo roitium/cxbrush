@@ -21,6 +21,8 @@ func runServer(args []string) int {
 		addr    = fs.String("addr", "127.0.0.1:8080", "监听地址")
 		dataDir = fs.String("data", "", "数据目录（默认 ~/.local/share/cxbrush）")
 		open    = fs.Bool("open", false, "允许任何人注册（默认只有第一个用户能注册）")
+		workers = fs.Int("workers", 2, "同时运行的任务数（1-16）")
+		videos  = fs.Int("videos", 2, "单个任务内同时上报的视频数（1-16）")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -48,6 +50,8 @@ func runServer(args []string) int {
 		FontPath:  fontPath,
 		FontData:  fontData,
 		AllowOpen: *open,
+		Workers:   *workers,
+		Videos:    *videos,
 	})
 }
 

@@ -25,6 +25,10 @@
       <div class="r"><span class="hint">当前账号</span><span>{app.me?.username || '—'}</span></div>
       <div class="r"><span class="hint">学习通会话</span><span class:ok={app.hasCookie}>{app.hasCookie ? '已保存 Cookie，服务端每小时自动续期' : '未连接'}</span></div>
       <div class="r"><span class="hint">答题模型</span><span class:ok={app.hasAI}>{app.hasAI ? app.aiModel : '未配置'}</span></div>
+      <div class="r">
+        <span class="hint">并行度</span>
+        <span class="num">{app.parallel.tasks} 个任务 · 每任务 {app.parallel.videos} 个视频</span>
+      </div>
       <div class="r"><span class="hint">数据位置</span><span class="mono">~/.local/share/cxbrush</span></div>
     </div>
     <p class="hint foot">

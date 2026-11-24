@@ -23,10 +23,11 @@ type Runner struct {
 	fontPath string
 	fontData []byte
 
-	mu      sync.Mutex
-	clients map[int64]*clientEntry
-	cancels map[int64]context.CancelFunc
-	sem     chan struct{}
+	mu        sync.Mutex
+	clients   map[int64]*clientEntry
+	cancels   map[int64]context.CancelFunc
+	sem       chan struct{}
+	videoConc int
 
 	decOnce sync.Once
 	dec     *cx.FontDecoder
@@ -42,15 +43,35 @@ type clientEntry struct {
 	c    *cx.Client
 }
 
-func NewRunner(st *store.Store, fontPath string, fontData []byte) *Runner {
+// NewRunner 创建任务调度器。workers 是同时运行的任务数，videos 是单个任务内
+// 同时上报的视频数；两者都会被夹到 1..maxParallel。
+func NewRunner(st *store.Store, fontPath string, fontData []byte, workers, videos int) *Runner {
 	return &Runner{
-		st:       st,
-		fontPath: fontPath,
-		fontData: fontData,
-		clients:  map[int64]*clientEntry{},
-		cancels:  map[int64]context.CancelFunc{},
-		sem:      make(chan struct{}, 2),
+		st:        st,
+		fontPath:  fontPath,
+		fontData:  fontData,
+		clients:   map[int64]*clientEntry{},
+		cancels:   map[int64]context.CancelFunc{},
+		sem:       make(chan struct{}, clampParallel(workers)),
+		videoConc: clampParallel(videos),
 	}
+}
+
+const maxParallel = 16
+
+func clampParallel(n int) int {
+	if n <= 0 {
+		return 2
+	}
+	if n > maxParallel {
+		return maxParallel
+	}
+	return n
+}
+
+// Parallelism 返回当前生效的并行度（同时任务数 / 单任务视频数）。
+func (r *Runner) Parallelism() (tasks, videos int) {
+	return cap(r.sem), r.videoConc
 }
 
 // ClientFor 返回该用户专属的学习通客户端；Cookie 变了会自动重建。
@@ -238,7 +259,7 @@ func (r *Runner) run(ctx context.Context, t *store.Task) {
 		r.finish(t.ID, store.StatusFailed, err.Error())
 		return
 	}
-	opt := cx.RunOptions{Concurrency: 2, DoDocs: true, DoWorks: t.DoWorks}
+	opt := cx.RunOptions{Concurrency: r.videoConc, DoDocs: true, DoWorks: t.DoWorks}
 	if t.DoWorks {
 		dec, derr := r.Decoder()
 		if derr != nil {
