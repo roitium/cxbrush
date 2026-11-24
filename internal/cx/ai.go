@@ -8,18 +8,16 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
 
-// DefaultAIModel 是通过 magpie tokenflux provider 使用的 DeepSeek Flash 模型。
+// DefaultAIModel 是未指定模型名时使用的默认值。
 const DefaultAIModel = "deepseek/deepseek-flash"
 
 // AIAnswerer 调用 OpenAI 兼容的 /chat/completions 接口给题目作答。
-// 默认从本机 magpie 的 providers.json 读取 tokenflux provider 的端点与 key，
-// 也可以用 CX_AI_BASE / CX_AI_KEY / CX_AI_MODEL 覆盖。
+// 配置一般来自 Web 页面的「模型配置」，也可以用 CX_AI_* 环境变量覆盖。
 type AIAnswerer struct {
 	BaseURL string
 	APIKey  string
@@ -28,10 +26,10 @@ type AIAnswerer struct {
 	HTTP    *http.Client
 }
 
-// NewAIAnswerer 按环境变量 → magpie tokenflux provider 的顺序构造答题器。
+// NewAIAnswerer 用环境变量构造答题器。
 func NewAIAnswerer() (*AIAnswerer, error) { return NewAIAnswererWith("", "", "") }
 
-// NewAIAnswererWith 用显式参数覆盖环境变量；仍为空时回退到 magpie。
+// NewAIAnswererWith 用显式参数覆盖环境变量；两者都没有时返回错误。
 func NewAIAnswererWith(base, key, model string) (*AIAnswerer, error) {
 	a := &AIAnswerer{
 		BaseURL: strings.TrimRight(firstNonEmpty(base, os.Getenv("CX_AI_BASE")), "/"),
@@ -39,71 +37,11 @@ func NewAIAnswererWith(base, key, model string) (*AIAnswerer, error) {
 		Model:   firstNonEmpty(model, os.Getenv("CX_AI_MODEL"), DefaultAIModel),
 	}
 	if a.BaseURL == "" || a.APIKey == "" {
-		dir, err := DefaultMagpieDir()
-		if err != nil {
-			return nil, err
-		}
-		base, key, err := LoadMagpieProvider(dir, "tokenflux")
-		if err != nil {
-			return nil, err
-		}
-		if a.BaseURL == "" {
-			a.BaseURL = strings.TrimRight(base, "/")
-		}
-		if a.APIKey == "" {
-			a.APIKey = key
-		}
+		return nil, fmt.Errorf("还没配置答题模型，请在页面「模型配置」里填写接口地址和 API Key")
 	}
 	a.Timeout = 120 * time.Second
 	a.HTTP = &http.Client{Timeout: a.Timeout}
 	return a, nil
-}
-
-// DefaultMagpieDir 返回 magpie 配置目录，可用 MAGPIE_DIR 覆盖。
-func DefaultMagpieDir() (string, error) {
-	if dir := os.Getenv("MAGPIE_DIR"); dir != "" {
-		return dir, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("找不到用户目录: %w", err)
-	}
-	return filepath.Join(home, ".config", "magpie"), nil
-}
-
-// LoadMagpieProvider 从 magpie 的 providers.json 里取指定 provider 的 chat 端点与 key。
-// 只读取，不修改 magpie 配置，也不会把 key 写进日志。
-func LoadMagpieProvider(magpieDir, id string) (base, key string, err error) {
-	path := filepath.Join(magpieDir, "providers.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", "", fmt.Errorf("读取 magpie providers.json: %w", err)
-	}
-	var root struct {
-		Providers []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-			Chat string `json:"chat"`
-			Key  string `json:"key"`
-			Off  bool   `json:"off"`
-		} `json:"providers"`
-	}
-	if err := json.Unmarshal(data, &root); err != nil {
-		return "", "", fmt.Errorf("解析 magpie providers.json: %w", err)
-	}
-	for _, p := range root.Providers {
-		if p.ID != id && !strings.EqualFold(p.Name, id) {
-			continue
-		}
-		if p.Off {
-			return "", "", fmt.Errorf("magpie provider %q 已停用", id)
-		}
-		if p.Chat == "" || p.Key == "" {
-			return "", "", fmt.Errorf("magpie provider %q 缺少 chat 或 key", id)
-		}
-		return p.Chat, p.Key, nil
-	}
-	return "", "", fmt.Errorf("magpie providers.json 里没有 %q", id)
 }
 
 type aiOption struct {

@@ -12,7 +12,7 @@
   let cls = $state('hint')
   let busy = $state(false)
 
-  const sourceText = { custom: '自定义', env: '环境变量', magpie: 'magpie tokenflux', none: '未配置' }
+  const sourceText = { custom: '自定义', env: '环境变量', none: '未配置' }
 
   async function load() {
     try {
@@ -39,7 +39,7 @@
     cls = 'hint'
     try {
       if (noKey) {
-        // 没有自定义 Key：只验证当前生效的 magpie / 环境变量配置。
+        // 没有自定义 Key：只验证当前生效的页面配置或环境变量。
         const t = await api('/api/settings/ai/test', {
           method: 'POST',
           body: JSON.stringify({ base, model }),
@@ -74,7 +74,7 @@
     busy = true
     try {
       await api('/api/settings/ai', { method: 'PUT', body: JSON.stringify({ clear: true }) })
-      msg = '已清除，回退到环境变量 / magpie'
+      msg = '已清除，回退到环境变量'
       cls = 'ok'
       await load()
       onSaved?.()
@@ -115,7 +115,7 @@
     <span class={cls}>{msg}</span>
   </div>
   {#if !keyHint}
-    <p class="hint">不填 Key 时只测试当前生效的 magpie / 环境变量配置；要换模型再填完整。</p>
+    <p class="hint">不填 Key 时只测试当前生效的页面配置或环境变量；要换模型再填完整。</p>
   {/if}
 </details>
 

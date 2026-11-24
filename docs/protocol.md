@@ -2,7 +2,7 @@
 
 把超星（学习通）答题页里的**内联混淆字体**提取出来，还原被替换成「载体字」的题干和选项，输出可直接交给 AI 作答的结构化 JSON。
 
-> **现状：纯 Go 实现已可用**（`cxbrush work` 子命令），不需要 Python、不需要浏览器/无头浏览器。
+> **现状：纯 Go 实现已可用**（Web 版），不需要 Python、不需要浏览器/无头浏览器。
 > 最初的 Python POC 已归档到 `docs/archive/poc/`，本文保留其协议分析与对照说明；
 > Go 用法见末尾「Go 实现」一节。
 
@@ -175,7 +175,7 @@ pyFlag=&courseId=..&classId=..&workAnswerId=..&answerId=..
 
 ---
 
-## Go 实现（`cxbrush work`）
+## Go 实现
 
 上述 Python POC 的能力已全部用纯 Go 重写，并补齐了提交：
 
@@ -189,41 +189,18 @@ pyFlag=&courseId=..&classId=..&workAnswerId=..&answerId=..
   无任何硬编码；`ChapterContent.Works` 已从 cards 里收集 work 项。
 - **提交**：`internal/cx/work.go` 的 `SubmitWork` 先 `validate` 再 POST，默认 dry-run 不提交。
 
-### 用法
+### 答题与提交
 
-```bash
-export PATH="$HOME/.local/share/mise/installs/go/1.27.0/bin:$PATH"
-cd /Volumes/vault7/Programming/cxbrush
+网页端的「自动做题」在扫描章节时如果发现 `work` 任务点，会自动：
 
-# 比对字体（Noto Sans CJK SC DemiLight，OFL）已经 embed 进二进制，
-# 直接跑就行；下面这条只用于单独导出/替换字体：
-go run ./cmd/cxbrush work -fetch-font   # 下载到 ~/.cache/cxbrush/
+1. 用 `Courses → Chapters → knowledge/cards` 的数据拼出题目 API 并抓取答题页；
+2. 提取内联字体并还原题干/选项；
+3. 调用模型作答（模型在页面「模型配置」里填写，或使用 `CX_AI_*` 环境变量）；
+4. 校验后提交；
+5. 重新打开一次该测验（提交后会 302 到批阅页），回查成绩与对错题数。
 
-# 离线解析一份 HTML（不联网）
-go run ./cmd/cxbrush work -html /tmp/work.html -o /tmp/work.json
-
-# 直接抓答题页（Cookie 从浏览器复制；无需浏览器）
-go run ./cmd/cxbrush work -url '<答题页或 api/work URL>' -cookie '<Cookie>' -o /tmp/work.json
-
-# 在线登录：按课程/章节定位，自动取该章第一个 quiz
-go run ./cmd/cxbrush work -u <账号> -p <密码> -course <courseId> -chapter <chapterId> -o /tmp/work.json
-
-# 多个测验时按 workid/jobid/title 关键词选择
-go run ./cmd/cxbrush work -course .. -chapter .. -work 56282284
-
-# 保存页面内联 TTF / 额外输出 Markdown / 保存最终 HTML
-go run ./cmd/cxbrush work -html /tmp/work.html -font-out /tmp/secret.ttf -md /tmp/work.md -dump-html /tmp/final.html
-```
-
-### 答案与提交
-
-默认**只输出、不提交**。要提交需同时给 `-answers` 和 `-submit`：
-
-```bash
-go run ./cmd/cxbrush work -html /tmp/work.html \
-  -answers '{"405957436":"D","405957441":"true","405957438":"ABC"}' \
-  -submit
-```
+回查只取与选项字母无关的信息（本次成绩、`aria-label="答案正确/错误"`），
+因为批阅页的「我的答案」用的是页面字母，而 `randomOptions` 会把字母和 value 打乱。
 
 答案匹配规则（`cx.NormalizeAnswer`）：
 
@@ -231,45 +208,8 @@ go run ./cmd/cxbrush work -html /tmp/work.html \
 - 也接受页面显示字母；多选支持 `AC`/`A,C`/`A C`，提交前按 value 升序拼接。
 - 判断题接受 `对/错`、`true/false`、`√/×`、`A/B`。
 
-`-submit` 会真正写入一次作答记录（有次数上限），请谨慎使用；完整协议与坑见上一节。
-
-也可以让模型直接作答（`-ai`），默认走本机 magpie 的 `tokenflux` provider（模型 `deepseek/deepseek-flash`）：
-
-```bash
-# 只输出模型答案，不提交
-go run ./cmd/cxbrush work -html /tmp/work.html -ai -o /tmp/work-ai.json
-
-# 模型作答并提交
-go run ./cmd/cxbrush work -url '<答题页URL>' -cookie '<Cookie>' -ai -submit
-
-# 覆盖模型端点/密钥
-go run ./cmd/cxbrush work -html /tmp/work.html -ai -ai-base https://... -ai-key sk-... -ai-model deepseek/deepseek-flash
-```
-
-### 刷课流程自动答题
-
-默认的交互式刷课（不带子命令运行 `cxbrush`）在扫描章节时如果发现 `work` 任务点，会自动：
-
-1. 用 `Courses → Chapters → knowledge/cards` 的数据拼出题目 API 并抓取答题页；
-2. 提取内联字体并还原题干/选项；
-3. 调用模型作答（默认 magpie `tokenflux` 的 `deepseek/deepseek-flash`）；
-4. 校验后提交，并把结果显示在日志区。
-5. 重新打开一次该测验（提交后会 302 到批阅页），回查成绩与对错题数。
-
-回查只取与选项字母无关的信息（本次成绩、`aria-label="答案正确/错误"`），
-因为批阅页的「我的答案」用的是页面字母，而 `randomOptions` 会把字母和 value 打乱。
-
-开关与覆盖：
-
-```bash
-cxbrush                 # 默认开启：视频 + 文档 + 章节测验
-cxbrush -works=false    # 只刷视频/文档，不做题
-cxbrush -ai-model deepseek/deepseek-flash -ai-base https://... -ai-key sk-...
-```
-
-凭据默认只从 `~/.config/magpie/providers.json` 的 `tokenflux` provider 读取（可用 `MAGPIE_DIR` 改目录），
-也可以用 `CX_AI_BASE` / `CX_AI_KEY` / `CX_AI_MODEL` 环境变量覆盖；key 不会写入日志或工程文件。
-题库/答案内容会发送给该模型端点，请自行确认可接受。
+提交会真正写入一次作答记录（有次数上限），由页面上的开关控制；
+`randomOptions=true` 时页面字母与提交值顺序不一致，因此一律按 value 提交。
 
 ### 解析策略（为什么不怕改版）
 
@@ -301,17 +241,16 @@ cxbrush -ai-model deepseek/deepseek-flash -ai-base https://... -ai-key sk-...
 ## Web 版（多用户）
 
 ```bash
-cxbrush serve                                  # 默认 127.0.0.1:8080
-cxbrush serve -addr 0.0.0.0:8080 -open         # 对外监听并放开注册
-cxbrush serve -data /srv/cxbrush               # 指定数据目录
+cxbrush                                        # 默认 127.0.0.1:8080
+cxbrush -addr 0.0.0.0:8080 -open               # 对外监听并放开注册
+cxbrush -data /srv/cxbrush                     # 指定数据目录
 ```
 
 - 前端是 `web/` 下的 Svelte 5 + Vite 单页应用，构建产物在 `internal/server/web/dist`，编译时 `embed` 进二进制：
 
 ```bash
-cd web && pnpm install && pnpm build   # 改完前端必须重新 build，否则 go build 里还是旧资源
-cd .. && go build -o cxbrush .          # 单文件，前后端一起
-pnpm dev                                # 调试用，/api 自动代理到 127.0.0.1:8080
+mise run build                          # 改完前端必须重新 build，否则 go build 里还是旧资源
+cd web && pnpm dev                      # 调试用，/api 自动代理到 127.0.0.1:8080
 ```
 
 - 第一个注册的用户直接生效；之后默认关闭注册，需要 `-open`。
@@ -329,11 +268,10 @@ pnpm dev                                # 调试用，/api 自动代理到 127.0
 - 每个用户保存自己的 Cookie，各自排队跑任务。
 - 整个进程**共享一份字体比对表**（约 200MB）和一个答题模型，所以不要「一个用户一个进程」。
 - 数据目录里有 `cxbrush.db` 和 `secret.key`（0600，别丢，丢了 Cookie 就解不开）。
-- 字体还原用的比对字体已内嵌，`-ref-font` / `CX_REF_FONT` 只是可选覆盖，
+- 字体还原用的比对字体已内嵌，`CX_REF_FONT` 只是可选覆盖，
   所以 release 是单文件，不依赖工作目录或外置盘。
 - 答题模型可以在页面的「模型配置」里改，Key 同样加密落库；优先级是
-  **页面配置 > `-ai-*` 启动参数 > `CX_AI_*` 环境变量 > magpie tokenflux**。
-  改完立即生效，不用重启。
+  **页面配置 > `CX_AI_*` 环境变量**。改完立即生效，不用重启。
 - 任务进度用 SSE 推送（`/api/tasks/{id}/events`），刷新页面可从 `after` 续上。
 - 页面刷新后的「任务点 N/M」不建投影表：`GET /api/tasks/{id}` 在服务端折叠
   已落库的事件流，直接返回 `items`（每个任务点的 kind/章节/状态/进度/分数），
@@ -367,8 +305,7 @@ pnpm dev                                # 调试用，/api 自动代理到 127.0
 - `internal/cx/ai.go`：模型作答（OpenAI 兼容 / `response_format=json_object`）
 - `internal/cx/solve.go`：抓题 → 解密 → 作答 → 提交 的完整流程
 - `internal/cx/review.go`：提交后回查批阅页（成绩、对错题数）
-- `cmd/cxbrush/work_cli.go`：`cxbrush work` 子命令
-- `cmd/cxbrush/serve_cli.go`：`cxbrush serve` 子命令
+- `cmd/cxbrush/serve_cli.go`：服务启动参数（`-addr` / `-data` / `-open`）
 - `internal/store`：SQLite 持久层（用户、凭据、任务、事件）
 - `internal/server`：HTTP API + SSE + 任务调度 + 内嵌 Web UI
 - `internal/assets`：内嵌比对字体（Noto Sans CJK，OFL）

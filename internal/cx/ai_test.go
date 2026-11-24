@@ -2,8 +2,6 @@ package cx
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -85,27 +83,6 @@ func TestNormalizeAIAnswersUsesValue(t *testing.T) {
 	}
 	if _, err := normalizeAIAnswers(qs, map[string]any{"1": "A", "3": "true"}); err == nil {
 		t.Fatal("漏答应该报错")
-	}
-}
-
-func TestLoadMagpieProvider(t *testing.T) {
-	dir := os.Getenv("MAGPIE_DIR")
-	if dir == "" {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, ".config", "magpie")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "providers.json")); err != nil {
-		t.Skip("本机没有 magpie providers.json")
-	}
-	base, key, err := LoadMagpieProvider(dir, "tokenflux")
-	if err != nil {
-		t.Fatalf("读取 tokenflux provider 失败: %v", err)
-	}
-	if base == "" || key == "" {
-		t.Fatal("base/key 为空")
-	}
-	if _, _, err := LoadMagpieProvider(dir, "not-a-provider"); err == nil {
-		t.Fatal("不存在的 provider 应该报错")
 	}
 }
 

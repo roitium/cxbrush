@@ -34,9 +34,6 @@ type Options struct {
 	DataDir   string
 	FontPath  string
 	FontData  []byte
-	AIBase    string
-	AIKey     string
-	AIModel   string
 	AllowOpen bool // 允许任何人注册（否则只在没有任何用户时允许注册第一个）
 }
 
@@ -50,7 +47,7 @@ type Server struct {
 
 func New(st *store.Store, opts Options) *Server {
 	s := &Server{st: st, key: st.Key(), opt: opts, mux: http.NewServeMux()}
-	s.runner = NewRunner(st, opts.FontPath, opts.FontData, opts.AIBase, opts.AIKey, opts.AIModel)
+	s.runner = NewRunner(st, opts.FontPath, opts.FontData)
 	s.routes()
 	return s
 }
@@ -345,13 +342,6 @@ func (s *Server) handleGetAI(w http.ResponseWriter, r *http.Request) {
 	case os.Getenv("CX_AI_BASE") != "" || os.Getenv("CX_AI_KEY") != "":
 		source = "env"
 		base, model = os.Getenv("CX_AI_BASE"), os.Getenv("CX_AI_MODEL")
-	case magpieConfigured():
-		source = "magpie"
-		if dir, err := cx.DefaultMagpieDir(); err == nil {
-			if b, _, err := cx.LoadMagpieProvider(dir, "tokenflux"); err == nil {
-				base = b
-			}
-		}
 	}
 	if model == "" {
 		model = cx.DefaultAIModel
@@ -435,17 +425,6 @@ func (s *Server) handleTestAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "model": a.Model, "latencyMs": took.Milliseconds()})
-}
-
-func magpieConfigured() bool {
-	dir, err := cx.DefaultMagpieDir()
-	if err != nil {
-		return false
-	}
-	if _, _, err := cx.LoadMagpieProvider(dir, "tokenflux"); err != nil {
-		return false
-	}
-	return true
 }
 
 func maskKey(k string) string {

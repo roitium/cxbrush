@@ -275,7 +275,7 @@ func (s *Store) SetAIConfig(cfg AIConfig) error {
 	return err
 }
 
-// ClearAIConfig 删除自定义配置，回退到环境变量 / magpie。
+// ClearAIConfig 删除自定义配置，回退到环境变量。
 func (s *Store) ClearAIConfig() error {
 	_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, aiConfigKey)
 	return err

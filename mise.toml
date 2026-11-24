@@ -1,0 +1,32 @@
+[tools]
+go = "1.27"
+node = "26"
+pnpm = "11"
+
+[tasks.deps]
+description = "安装前端依赖"
+dir = "web"
+run = "pnpm install"
+
+[tasks.web]
+description = "构建前端（产物会 embed 进二进制）"
+dir = "web"
+run = "pnpm build"
+
+[tasks.build]
+description = "构建单文件二进制"
+depends = ["web"]
+run = "go build -o cxbrush ./cmd/cxbrush"
+
+[tasks.test]
+description = "跑 Go 测试"
+run = "go test ./..."
+
+[tasks.fmt]
+description = "格式化 Go 代码"
+run = "gofmt -w ."
+
+[tasks.run]
+description = "构建并启动 Web 服务"
+depends = ["build"]
+run = "./cxbrush -data ~/.local/share/cxbrush"

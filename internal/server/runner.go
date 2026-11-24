@@ -22,9 +22,6 @@ type Runner struct {
 	st       *store.Store
 	fontPath string
 	fontData []byte
-	aiBase   string
-	aiKey    string
-	aiModel  string
 
 	mu      sync.Mutex
 	clients map[int64]*clientEntry
@@ -45,14 +42,11 @@ type clientEntry struct {
 	c    *cx.Client
 }
 
-func NewRunner(st *store.Store, fontPath string, fontData []byte, aiBase, aiKey, aiModel string) *Runner {
+func NewRunner(st *store.Store, fontPath string, fontData []byte) *Runner {
 	return &Runner{
 		st:       st,
 		fontPath: fontPath,
 		fontData: fontData,
-		aiBase:   aiBase,
-		aiKey:    aiKey,
-		aiModel:  aiModel,
 		clients:  map[int64]*clientEntry{},
 		cancels:  map[int64]context.CancelFunc{},
 		sem:      make(chan struct{}, 2),
@@ -145,14 +139,12 @@ func cookieHash(cookie string) string {
 }
 
 func (r *Runner) Answerer() (*cx.AIAnswerer, error) {
-	base, key, model := r.aiBase, r.aiKey, r.aiModel
-	// Web 上保存的配置优先于启动参数，改完立刻生效。
+	// 配置来自 Web 页面（存 SQLite），环境变量由 NewAIAnswererWith 兜底。
+	var base, key, model string
 	if cfg, err := r.st.AIConfig(); err != nil {
 		return nil, fmt.Errorf("读取模型配置: %w", err)
 	} else if cfg != nil {
-		base = firstNonEmpty(cfg.Base, base)
-		key = firstNonEmpty(cfg.Key, key)
-		model = firstNonEmpty(cfg.Model, model)
+		base, key, model = cfg.Base, cfg.Key, cfg.Model
 	}
 	sum := sha1.Sum([]byte(base + "\x00" + key + "\x00" + model))
 	hash := hex.EncodeToString(sum[:])
