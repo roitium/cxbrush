@@ -19,10 +19,10 @@ var cookieHosts = []string{"mooc1-2.chaoxing.com", "mooc1-gray.chaoxing.com", "m
 // Runner 负责跑任务：每个用户一个独立的 cx.Client（各自的 cookie jar），
 // 整个进程共享一份字体比对表和答题模型。
 type Runner struct {
-	st       *store.Store
-	fontPath string
-	fontData []byte
-	cache    *cx.AnswerCache
+	st             *store.Store
+	fontPath       string
+	fontData       []byte
+	allowPrivateAI bool
 
 	mu      sync.Mutex
 	clients map[int64]*clientEntry
@@ -34,9 +34,8 @@ type Runner struct {
 	dec     *cx.FontDecoder
 	decErr  error
 
-	aiMu   sync.Mutex
-	ai     *cx.AIAnswerer
-	aiHash string
+	aiMu     sync.Mutex
+	aiByUser map[int64]aiCacheEntry
 }
 
 type clientEntry struct {
@@ -44,22 +43,26 @@ type clientEntry struct {
 	c    *cx.Client
 }
 
-// NewRunner 创建任务调度器。workers 是全进程同时运行任务数的硬上限，
-// 每个用户自己的并行度存在 prefs 表里，两者取交集。
-func NewRunner(st *store.Store, fontPath string, fontData []byte, workers int) *Runner {
-	return &Runner{
-		st:       st,
-		fontPath: fontPath,
-		fontData: fontData,
-		clients:  map[int64]*clientEntry{},
-		cancels:  map[int64]context.CancelFunc{},
-		sem:      make(chan struct{}, clampWorkers(workers)),
-		gates:    map[int64]*userGate{},
-	}
+type aiCacheEntry struct {
+	ai   *cx.AIAnswerer
+	hash string
 }
 
-// SetAnswerCache 设置题目答案缓存（整个进程共享）。
-func (r *Runner) SetAnswerCache(c *cx.AnswerCache) { r.cache = c }
+// NewRunner 创建任务调度器。workers 是全进程同时运行任务数的硬上限，
+// 每个用户自己的并行度存在 prefs 表里，两者取交集。
+func NewRunner(st *store.Store, fontPath string, fontData []byte, workers int, allowPrivateAI bool) *Runner {
+	return &Runner{
+		st:             st,
+		fontPath:       fontPath,
+		fontData:       fontData,
+		allowPrivateAI: allowPrivateAI,
+		clients:        map[int64]*clientEntry{},
+		cancels:        map[int64]context.CancelFunc{},
+		sem:            make(chan struct{}, clampWorkers(workers)),
+		gates:          map[int64]*userGate{},
+		aiByUser:       map[int64]aiCacheEntry{},
+	}
+}
 
 const maxWorkers = 32
 
@@ -213,10 +216,10 @@ func cookieHash(cookie string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (r *Runner) Answerer() (*cx.AIAnswerer, error) {
-	// 配置来自 Web 页面（存 SQLite），环境变量由 NewAIAnswererWith 兜底。
+func (r *Runner) Answerer(userID int64) (*cx.AIAnswerer, error) {
+	// 配置来自当前用户（存 SQLite 并加密），环境变量由 NewAIAnswererWith 兜底。
 	var base, key, model string
-	if cfg, err := r.st.AIConfig(); err != nil {
+	if cfg, err := r.st.AIConfig(userID); err != nil {
 		return nil, fmt.Errorf("读取模型配置: %w", err)
 	} else if cfg != nil {
 		base, key, model = cfg.Base, cfg.Key, cfg.Model
@@ -226,14 +229,14 @@ func (r *Runner) Answerer() (*cx.AIAnswerer, error) {
 
 	r.aiMu.Lock()
 	defer r.aiMu.Unlock()
-	if r.ai != nil && r.aiHash == hash {
-		return r.ai, nil
+	if e, ok := r.aiByUser[userID]; ok && e.hash == hash && e.ai != nil {
+		return e.ai, nil
 	}
-	a, err := cx.NewAIAnswererWith(base, key, model)
+	a, err := cx.NewAIAnswererWithOptions(base, key, model, r.allowPrivateAI)
 	if err != nil {
 		return nil, err
 	}
-	r.ai, r.aiHash = a, hash
+	r.aiByUser[userID] = aiCacheEntry{ai: a, hash: hash}
 	return a, nil
 }
 
@@ -327,14 +330,17 @@ func (r *Runner) run(ctx context.Context, t *store.Task, videos int) {
 		r.finish(t.ID, store.StatusFailed, err.Error())
 		return
 	}
-	opt := cx.RunOptions{Concurrency: videos, DoDocs: true, DoReads: true, DoLive: t.DoLive, DoWorks: t.DoWorks, Cache: r.cache}
+	opt := cx.RunOptions{
+		Concurrency: videos, DoDocs: true, DoReads: true, DoLive: t.DoLive, DoWorks: t.DoWorks,
+		Cache: cx.NewAnswerCache(r.st, t.UserID),
+	}
 	if t.DoWorks {
 		dec, derr := r.Decoder()
 		if derr != nil {
 			r.finish(t.ID, store.StatusFailed, "字体比对表不可用: "+derr.Error())
 			return
 		}
-		ai, aerr := r.Answerer()
+		ai, aerr := r.Answerer(t.UserID)
 		if aerr != nil {
 			r.finish(t.ID, store.StatusFailed, "答题模型不可用: "+aerr.Error())
 			return

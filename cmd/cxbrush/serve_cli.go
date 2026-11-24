@@ -18,10 +18,13 @@ func runServer(args []string) int {
 	fs := flag.NewFlagSet("cxbrush", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var (
-		addr    = fs.String("addr", "127.0.0.1:8080", "监听地址")
-		dataDir = fs.String("data", "", "数据目录（默认 ~/.local/share/cxbrush）")
-		open    = fs.Bool("open", false, "允许任何人注册（默认只有第一个用户能注册）")
-		workers = fs.Int("workers", 8, "全进程同时运行任务数的硬上限（每个用户自己的并行度在页面里设置）")
+		addr         = fs.String("addr", "127.0.0.1:8080", "监听地址")
+		dataDir      = fs.String("data", "", "数据目录（默认 ~/.local/share/cxbrush）")
+		open         = fs.Bool("open", false, "允许任何人注册（默认只有第一个用户能注册）")
+		workers      = fs.Int("workers", 8, "全进程同时运行任务数的硬上限（每个用户自己的并行度在页面里设置）")
+		privateAI    = fs.Bool("allow-private-ai", false, "允许模型地址指向内网/回环（本地模型端点）")
+		secureCookie = fs.Bool("secure-cookie", false, "会话 Cookie 强制带 Secure（反向代理终结 TLS 时打开）")
+		trustProxy   = fs.Bool("trust-proxy", false, "信任 X-Forwarded-For / X-Forwarded-Proto（仅在反向代理后面打开）")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -44,12 +47,15 @@ func runServer(args []string) int {
 	}
 
 	return runServe(ctx, server.Options{
-		Addr:      *addr,
-		DataDir:   dir,
-		FontPath:  fontPath,
-		FontData:  fontData,
-		AllowOpen: *open,
-		Workers:   *workers,
+		Addr:           *addr,
+		DataDir:        dir,
+		FontPath:       fontPath,
+		FontData:       fontData,
+		AllowOpen:      *open,
+		Workers:        *workers,
+		AllowPrivateAI: *privateAI,
+		SecureCookie:   *secureCookie,
+		TrustProxy:     *trustProxy,
 	})
 }
 

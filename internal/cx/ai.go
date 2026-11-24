@@ -31,6 +31,11 @@ func NewAIAnswerer() (*AIAnswerer, error) { return NewAIAnswererWith("", "", "")
 
 // NewAIAnswererWith 用显式参数覆盖环境变量；两者都没有时返回错误。
 func NewAIAnswererWith(base, key, model string) (*AIAnswerer, error) {
+	return NewAIAnswererWithOptions(base, key, model, false)
+}
+
+// NewAIAnswererWithOptions 指定是否允许访问内网地址（本地模型端点）。
+func NewAIAnswererWithOptions(base, key, model string, allowPrivate bool) (*AIAnswerer, error) {
 	a := &AIAnswerer{
 		BaseURL: strings.TrimRight(firstNonEmpty(base, os.Getenv("CX_AI_BASE")), "/"),
 		APIKey:  firstNonEmpty(key, os.Getenv("CX_AI_KEY")),
@@ -40,7 +45,7 @@ func NewAIAnswererWith(base, key, model string) (*AIAnswerer, error) {
 		return nil, fmt.Errorf("还没配置答题模型，请在页面「模型配置」里填写接口地址和 API Key")
 	}
 	a.Timeout = 120 * time.Second
-	a.HTTP = &http.Client{Timeout: a.Timeout}
+	a.HTTP = NewGuardedHTTPClient(allowPrivate, a.Timeout)
 	return a, nil
 }
 

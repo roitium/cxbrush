@@ -36,21 +36,29 @@ type Options struct {
 	FontData  []byte
 	AllowOpen bool // 允许任何人注册（否则只在没有任何用户时允许注册第一个）
 	Workers   int  // 全进程同时运行任务数的硬上限
+	// AllowPrivateAI 允许模型地址指向内网/回环（本地模型端点）。
+	AllowPrivateAI bool
+	// SecureCookie 强制会话 Cookie 带 Secure（反向代理终结 TLS 时打开）。
+	SecureCookie bool
+	// TrustProxy 信任 X-Forwarded-For / X-Forwarded-Proto（仅在反向代理后面打开）。
+	TrustProxy bool
 }
 
 type Server struct {
-	st     *store.Store
-	runner *Runner
-	key    []byte
-	opt    Options
-	mux    *http.ServeMux
+	st      *store.Store
+	runner  *Runner
+	key     []byte
+	opt     Options
+	mux     *http.ServeMux
+	handler http.Handler
+	limiter *loginLimiter
 }
 
 func New(st *store.Store, opts Options) *Server {
-	s := &Server{st: st, key: st.Key(), opt: opts, mux: http.NewServeMux()}
-	s.runner = NewRunner(st, opts.FontPath, opts.FontData, opts.Workers)
-	s.runner.SetAnswerCache(cx.NewAnswerCache(s.st))
+	s := &Server{st: st, key: st.Key(), opt: opts, mux: http.NewServeMux(), limiter: newLoginLimiter()}
+	s.runner = NewRunner(st, opts.FontPath, opts.FontData, opts.Workers, opts.AllowPrivateAI)
 	s.routes()
+	s.handler = s.guard(s.mux)
 	return s
 }
 
@@ -68,7 +76,7 @@ func Run(ctx context.Context, opts Options) error {
 
 	httpSrv := &http.Server{
 		Addr:              opts.Addr,
-		Handler:           srv.mux,
+		Handler:           srv.handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errCh := make(chan error, 1)
@@ -180,16 +188,20 @@ func (s *Server) parseToken(tok string) (int64, bool) {
 	return uid, true
 }
 
-func (s *Server) setSession(w http.ResponseWriter, uid int64) {
+func (s *Server) setSession(w http.ResponseWriter, r *http.Request, uid int64) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    s.newToken(uid),
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   s.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   30 * 24 * 3600,
 	})
 }
+
+// dummyHash 用于「用户不存在」时也跑一次 bcrypt，避免通过响应耗时枚举用户名。
+var dummyHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy")
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req struct{ Username, Password string }
@@ -205,6 +217,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusForbidden, "已关闭注册（启动时加 -open 可放开）")
 		return
 	}
+	key, ip := s.loginKey(r, "reg", req.Username)
+	if s.tooMany(w, key, ip) {
+		return
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
@@ -212,10 +228,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := s.st.CreateUser(req.Username, string(hash))
 	if err != nil {
+		s.limiter.fail(key, ip)
 		httpError(w, http.StatusBadRequest, "用户名已存在")
 		return
 	}
-	s.setSession(w, u.ID)
+	s.limiter.success(key)
+	s.setSession(w, r, u.ID)
 	writeJSON(w, map[string]any{"user": u})
 }
 
@@ -224,21 +242,32 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
+	key, ip := s.loginKey(r, "login", req.Username)
+	if s.tooMany(w, key, ip) {
+		return
+	}
 	u, hash, err := s.st.UserByName(strings.TrimSpace(req.Username))
 	if err != nil {
+		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(req.Password))
+		s.limiter.fail(key, ip)
 		httpError(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
+		s.limiter.fail(key, ip)
 		httpError(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
-	s.setSession(w, u.ID)
+	s.limiter.success(key)
+	s.setSession(w, r, u.ID)
 	writeJSON(w, map[string]any{"user": u})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: s.cookieSecure(r), SameSite: http.SameSiteLaxMode,
+	})
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -246,7 +275,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	cookie, _ := s.st.Chaoxing(u.ID)
 	hasAI, aiModel := false, ""
-	if a, err := s.runner.Answerer(); err == nil && a != nil {
+	if a, err := s.runner.Answerer(u.ID); err == nil && a != nil {
 		hasAI, aiModel = true, a.Model
 	}
 	prefs, _ := s.st.Prefs(u.ID)
@@ -275,21 +304,28 @@ func (s *Server) handleChaoxingLogin(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "手机号和密码不能为空")
 		return
 	}
+	key, ip := s.loginKey(r, "cx", phone)
+	if s.tooMany(w, key, ip) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
 	c := cx.New(nil)
 	if err := c.Login(ctx, phone, req.Password); err != nil {
+		s.limiter.fail(key, ip)
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	courses, err := c.Courses(ctx)
 	if err != nil {
+		s.limiter.fail(key, ip)
 		httpError(w, http.StatusBadRequest, "登录成功但读取课程失败: "+err.Error())
 		return
 	}
 	cookie := c.CookieHeader(cookieHosts...)
 	if !strings.Contains(cookie, "_uid=") && !strings.Contains(cookie, "UID=") && !strings.Contains(cookie, "_d=") {
+		s.limiter.fail(key, ip)
 		httpError(w, http.StatusBadGateway, "登录成功但没拿到会话 Cookie，请改用 Cookie 方式导入")
 		return
 	}
@@ -297,6 +333,7 @@ func (s *Server) handleChaoxingLogin(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.limiter.success(key)
 	writeJSON(w, map[string]any{"ok": true, "courses": len(courses), "name": c.Name})
 }
 
@@ -333,8 +370,13 @@ func (s *Server) handleSetCookie(w http.ResponseWriter, r *http.Request) {
 
 // ---------- 模型配置 ----------
 
+func (s *Server) checkAIBase(ctx context.Context, base string) error {
+	return cx.ValidateAIBaseURL(ctx, base, s.opt.AllowPrivateAI)
+}
+
 func (s *Server) handleGetAI(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.st.AIConfig()
+	u := userFrom(r)
+	cfg, err := s.st.AIConfig(u.ID)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -361,6 +403,7 @@ func (s *Server) handleGetAI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetAI(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
 	var req struct {
 		Base  string `json:"base"`
 		Key   string `json:"key"`
@@ -371,7 +414,7 @@ func (s *Server) handleSetAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Clear {
-		if err := s.st.ClearAIConfig(); err != nil {
+		if err := s.st.ClearAIConfig(u.ID); err != nil {
 			httpError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -386,7 +429,7 @@ func (s *Server) handleSetAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if key == "" {
-		if old, err := s.st.AIConfig(); err == nil && old != nil {
+		if old, err := s.st.AIConfig(u.ID); err == nil && old != nil {
 			key = old.Key
 		}
 	}
@@ -394,12 +437,12 @@ func (s *Server) handleSetAI(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "API Key 不能为空")
 		return
 	}
-	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
-		httpError(w, http.StatusBadRequest, "接口地址要以 http:// 或 https:// 开头")
+	if err := s.checkAIBase(r.Context(), base); err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	cfg := store.AIConfig{Base: base, Key: key, Model: model}
-	if err := s.st.SetAIConfig(cfg); err != nil {
+	if err := s.st.SetAIConfig(u.ID, cfg); err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -407,6 +450,7 @@ func (s *Server) handleSetAI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTestAI(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
 	var req struct {
 		Base  string `json:"base"`
 		Key   string `json:"key"`
@@ -415,12 +459,16 @@ func (s *Server) handleTestAI(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	base, key, model := req.Base, req.Key, req.Model
-	if cfg, err := s.st.AIConfig(); err == nil && cfg != nil {
+	if cfg, err := s.st.AIConfig(u.ID); err == nil && cfg != nil {
 		base = firstNonEmpty(base, cfg.Base)
 		key = firstNonEmpty(key, cfg.Key)
 		model = firstNonEmpty(model, cfg.Model)
 	}
-	a, err := cx.NewAIAnswererWith(base, key, model)
+	if err := s.checkAIBase(r.Context(), base); err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	a, err := cx.NewAIAnswererWithOptions(base, key, model, s.opt.AllowPrivateAI)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return

@@ -36,8 +36,16 @@ mise run build        # 等价于 cd web && pnpm build && go build -o cxbrush ./
 | `-data` | `~/.local/share/cxbrush` | 数据目录 |
 | `-open` | `false` | 允许任何人注册（默认只有第一个用户能注册） |
 | `-workers` | `8` | 全进程同时运行任务数的硬上限（1-32） |
+| `-allow-private-ai` | `false` | 允许模型地址指向内网/回环（本地 LLM 端点）；默认只放行 https 公网地址 |
+| `-secure-cookie` | `false` | 会话 Cookie 强制带 `Secure`（反向代理终结 TLS 时打开） |
+| `-trust-proxy` | `false` | 信任 `X-Forwarded-For` / `X-Forwarded-Proto`（仅在反向代理后面打开） |
 
 学习通账号、模型 Key 等都在页面里配置。
+
+**线上部署**：请放在 HTTPS 反向代理（Caddy/Nginx）后面，并加 `-secure-cookie -trust-proxy`。
+服务默认只监听 `127.0.0.1`，需要对外时让反代连它，不要直接把 8080 暴露到公网。
+状态变更请求会校验 `Origin` 同源，跨站请求返回 403；登录失败按「IP + 账号」指数退避，
+连续失败会返回 429 + `Retry-After`（进程内计数，多实例部署需要换成共享存储）。
 
 直播任务点会在「开始任务」时单独开关；它按真实时长上报（59 分钟回放就要挂 59 分钟），
 未开始或已结束且不允许回放的直播会跳过。
@@ -55,12 +63,16 @@ mise run build        # 等价于 cd web && pnpm build && go build -o cxbrush ./
 不建议开高：学习通对进度上报有频率限制，2–3 比较稳，开高更容易出现进度不确认
 甚至触发风控。`-workers` 是全进程的硬上限，超过时任务会排队。
 
-**模型**（优先级从高到低）：
+**模型**（按用户隔离，每个用户用自己的 Key、各自计费；优先级从高到低）：
 
-1. Web 页面「模型配置」里保存的值（AES-GCM 加密存 SQLite）
+1. Web 页面「模型配置」里保存的值（AES-GCM 加密存 SQLite，键为 `ai:<uid>`）
 2. `CX_AI_BASE` / `CX_AI_KEY` / `CX_AI_MODEL` 环境变量
 
 没有配置时页面会提示，自动做题不会启用。
+模型地址默认只允许 https 公网域名/IP：保存和每次请求都会校验（含 DNS 重绑定与重定向），
+避免把服务端当成 SSRF 跳板。本地模型端点需显式加 `-allow-private-ai`。
+
+**答案缓存**：同样按用户隔离（键为 `<uid>:<题目指纹>`），一个用户的答案不会复用给另一个用户。
 
 **字体**：默认使用 `internal/assets/NotoSansCJKsc-DemiLight.otf`（已 embed）。
 需要用别的字体做对照时，设置 `CX_REF_FONT=/path/to/font.otf` 即可。

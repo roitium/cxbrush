@@ -185,31 +185,82 @@ func TestAIConfigRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	u, err := st.CreateUser("alice", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := st.CreateUser("bob", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	if cfg, err := st.AIConfig(); err != nil || cfg != nil {
+	if cfg, err := st.AIConfig(u.ID); err != nil || cfg != nil {
 		t.Fatalf("空库应返回 nil：%+v %v", cfg, err)
 	}
 	want := AIConfig{Base: "https://api.example.com/v1", Key: "sk-dummy-0000", Model: "deepseek/deepseek-flash"}
-	if err := st.SetAIConfig(want); err != nil {
+	if err := st.SetAIConfig(u.ID, want); err != nil {
 		t.Fatal(err)
 	}
-	got, err := st.AIConfig()
+	got, err := st.AIConfig(u.ID)
 	if err != nil || got == nil || *got != want {
 		t.Fatalf("AIConfig = %+v %v", got, err)
 	}
+	// 另一个用户看不到这份配置（Key 与费用各自独立）。
+	if cfg, err := st.AIConfig(u2.ID); err != nil || cfg != nil {
+		t.Fatalf("user2 不应读到 user1 的配置：%+v %v", cfg, err)
+	}
 	// Key 不能明文落库。
 	var enc []byte
-	if err := st.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, aiConfigKey).Scan(&enc); err != nil {
+	if err := st.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, aiConfigKey(u.ID)).Scan(&enc); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(enc, []byte("sk-dummy-0000")) {
 		t.Fatal("模型配置应该加密存储")
 	}
 
-	if err := st.ClearAIConfig(); err != nil {
+	if err := st.ClearAIConfig(u.ID); err != nil {
 		t.Fatal(err)
 	}
-	if cfg, err := st.AIConfig(); err != nil || cfg != nil {
+	if cfg, err := st.AIConfig(u.ID); err != nil || cfg != nil {
 		t.Fatalf("清除后应返回 nil：%+v %v", cfg, err)
 	}
+}
+
+// 旧版全局配置在启动时应迁给第一个用户，而不是继续被所有人共用。
+func TestMigrateLegacyAIConfig(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := st.CreateUser("alice", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := st.CreateUser("bob", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, _ := json.Marshal(AIConfig{Base: "https://api.example.com/v1", Key: "sk-legacy", Model: "m"})
+	enc, err := st.seal(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`INSERT INTO settings(key, value) VALUES(?,?)`, legacyAIConfigKey, enc); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := st.AIConfig(u.ID); err != nil || cfg == nil || cfg.Key != "sk-legacy" {
+		t.Fatalf("旧配置应迁给第一个用户：%+v %v", cfg, err)
+	}
+	if cfg, err := st.AIConfig(u2.ID); err != nil || cfg != nil {
+		t.Fatalf("不应迁给第二个用户：%+v %v", cfg, err)
+	}
+	var n int
+	if err := st.db.QueryRow(`SELECT count(*) FROM settings WHERE key = ?`, legacyAIConfigKey).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("旧键应被删除，count=%d err=%v", n, err)
+	}
+	st.Close()
 }

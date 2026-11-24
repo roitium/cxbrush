@@ -36,11 +36,11 @@ func choiceQuestion(id, stem string, options ...[2]string) *Question {
 
 func TestAnswerCacheReusesAcrossShuffle(t *testing.T) {
 	store := newMemAnswerStore()
-	cache := NewAnswerCache(store)
+	cache := NewAnswerCache(store, 1)
 	q := choiceQuestion("1", "中国的首都是？", [2]string{"A", "北京"}, [2]string{"B", "上海"})
 	cache.Put(q, []string{"A"})
 
-	reloaded := NewAnswerCache(store)
+	reloaded := NewAnswerCache(store, 1)
 	shuffled := choiceQuestion("9", "中国的首都是？", [2]string{"C", "上海"}, [2]string{"D", "北京"})
 	answers, misses := reloaded.Lookup([]*Question{shuffled})
 	if len(misses) != 0 {
@@ -52,7 +52,7 @@ func TestAnswerCacheReusesAcrossShuffle(t *testing.T) {
 }
 
 func TestAnswerCacheMissWhenOptionsChange(t *testing.T) {
-	cache := NewMemoryAnswerCache()
+	cache := NewMemoryAnswerCache(1)
 	q := choiceQuestion("1", "中国的首都是？", [2]string{"A", "北京"}, [2]string{"B", "上海"})
 	cache.Put(q, []string{"A"})
 
@@ -64,7 +64,7 @@ func TestAnswerCacheMissWhenOptionsChange(t *testing.T) {
 }
 
 func TestAnswerCachePartialHit(t *testing.T) {
-	cache := NewMemoryAnswerCache()
+	cache := NewMemoryAnswerCache(1)
 	known := choiceQuestion("1", "1+1=?", [2]string{"A", "2"}, [2]string{"B", "3"})
 	cache.Put(known, []string{"A"})
 
@@ -81,16 +81,16 @@ func TestAnswerCachePartialHit(t *testing.T) {
 func TestAnswerCacheFreeText(t *testing.T) {
 	store := newMemAnswerStore()
 	q := &Question{ID: "1", TypeCode: "2", Type: "填空题", Stem: "中国的首都是____"}
-	NewAnswerCache(store).Put(q, []string{"北京"})
+	NewAnswerCache(store, 1).Put(q, []string{"北京"})
 
-	answers, misses := NewAnswerCache(store).Lookup([]*Question{{ID: "2", TypeCode: "2", Type: "填空题", Stem: "中国的首都是____"}})
+	answers, misses := NewAnswerCache(store, 1).Lookup([]*Question{{ID: "2", TypeCode: "2", Type: "填空题", Stem: "中国的首都是____"}})
 	if len(misses) != 0 || len(answers["2"]) != 1 || answers["2"][0] != "北京" {
 		t.Fatalf("answers=%v misses=%v", answers, misses)
 	}
 }
 
 func TestAnswerCacheJudgmentEmptyText(t *testing.T) {
-	cache := NewMemoryAnswerCache()
+	cache := NewMemoryAnswerCache(1)
 	q := &Question{ID: "1", TypeCode: "3", Type: "判断题", Stem: "地球是圆的", Options: []Option{
 		{Value: "true", Text: ""}, {Value: "false", Text: ""},
 	}}
@@ -102,5 +102,19 @@ func TestAnswerCacheJudgmentEmptyText(t *testing.T) {
 	answers, misses := cache.Lookup([]*Question{shuffled})
 	if len(misses) != 0 || len(answers["2"]) != 1 || answers["2"][0] != "true" {
 		t.Fatalf("answers=%v misses=%v", answers, misses)
+	}
+}
+
+// 一个用户的答案不能泄漏给另一个用户（不同老师同一道题的正确答案也可能不同）。
+func TestAnswerCacheIsolatedPerUser(t *testing.T) {
+	store := newMemAnswerStore()
+	q := choiceQuestion("1", "中国的首都是？", [2]string{"A", "北京"}, [2]string{"B", "上海"})
+	NewAnswerCache(store, 1).Put(q, []string{"A"})
+
+	if _, misses := NewAnswerCache(store, 2).Lookup([]*Question{q}); len(misses) != 1 {
+		t.Fatalf("user 2 不应命中 user 1 的缓存")
+	}
+	if _, misses := NewAnswerCache(store, 1).Lookup([]*Question{q}); len(misses) != 0 {
+		t.Fatalf("user 1 应该命中自己的缓存")
 	}
 }

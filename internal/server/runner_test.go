@@ -16,10 +16,10 @@ func TestClampWorkers(t *testing.T) {
 }
 
 func TestNewRunnerCeiling(t *testing.T) {
-	if got := NewRunner(nil, "", nil, 3).Ceiling(); got != 3 {
+	if got := NewRunner(nil, "", nil, 3, false).Ceiling(); got != 3 {
 		t.Fatalf("Ceiling() = %d, want 3", got)
 	}
-	if got := NewRunner(nil, "", nil, 0).Ceiling(); got != 8 {
+	if got := NewRunner(nil, "", nil, 0, false).Ceiling(); got != 8 {
 		t.Fatalf("默认 Ceiling() = %d, want 8", got)
 	}
 }

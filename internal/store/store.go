@@ -140,6 +140,20 @@ func (s *Store) migrate() error {
 		!strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
+	// 旧版模型配置是全局的，迁移给第一个用户，避免继续被所有人共用。
+	var legacy []byte
+	if err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, legacyAIConfigKey).Scan(&legacy); err == nil {
+		var uid int64
+		if err := s.db.QueryRow(`SELECT id FROM users ORDER BY id LIMIT 1`).Scan(&uid); err == nil {
+			if _, err := s.db.Exec(`INSERT INTO settings(key, value) VALUES(?,?)
+				ON CONFLICT(key) DO UPDATE SET value=excluded.value`, aiConfigKey(uid), legacy); err != nil {
+				return err
+			}
+			if _, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, legacyAIConfigKey); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -257,12 +271,14 @@ type AIConfig struct {
 	Model string `json:"model"`
 }
 
-const aiConfigKey = "ai"
+const legacyAIConfigKey = "ai"
 
-// AIConfig 读取已保存的模型配置；没有配置过时返回 (nil, nil)。
-func (s *Store) AIConfig() (*AIConfig, error) {
+func aiConfigKey(userID int64) string { return fmt.Sprintf("ai:%d", userID) }
+
+// AIConfig 读取某个用户已保存的模型配置；没有配置过时返回 (nil, nil)。
+func (s *Store) AIConfig(userID int64) (*AIConfig, error) {
 	var enc []byte
-	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, aiConfigKey).Scan(&enc)
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, aiConfigKey(userID)).Scan(&enc)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -280,8 +296,8 @@ func (s *Store) AIConfig() (*AIConfig, error) {
 	return &cfg, nil
 }
 
-// SetAIConfig 加密保存模型配置。
-func (s *Store) SetAIConfig(cfg AIConfig) error {
+// SetAIConfig 加密保存某个用户的模型配置。
+func (s *Store) SetAIConfig(userID int64, cfg AIConfig) error {
 	plain, err := json.Marshal(cfg)
 	if err != nil {
 		return err
@@ -291,13 +307,13 @@ func (s *Store) SetAIConfig(cfg AIConfig) error {
 		return err
 	}
 	_, err = s.db.Exec(`INSERT INTO settings(key, value) VALUES(?,?)
-		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, aiConfigKey, enc)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, aiConfigKey(userID), enc)
 	return err
 }
 
-// ClearAIConfig 删除自定义配置，回退到环境变量。
-func (s *Store) ClearAIConfig() error {
-	_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, aiConfigKey)
+// ClearAIConfig 删除某个用户的自定义配置，回退到环境变量。
+func (s *Store) ClearAIConfig(userID int64) error {
+	_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, aiConfigKey(userID))
 	return err
 }
 
