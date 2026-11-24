@@ -109,3 +109,8 @@ docs/archive/poc/   最初的 Python POC（已归档，仅作参考）
 
 本项目仅用于个人学习与技术研究。使用前请确认符合所在平台的服务条款，
 因使用产生的后果由使用者自行承担。
+
+## 许可证
+
+[WTFPL](LICENSE)（Do What The Fuck You Want To Public License, Version 2）。
+内嵌字体的许可证见 `internal/assets/`。
