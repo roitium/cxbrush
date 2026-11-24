@@ -319,7 +319,7 @@
       </div>
       <div class="bar {barClass}"><i style="width:{Math.min(100, pct)}%"></i></div>
       {#if active.length}
-        {#each active.slice(0, 4) as a (a.id)}
+        {#each active as a (a.id)}
           <div class="current">
             <span class="hint">当前</span>
             <span class="cname truncate">{a.name}</span>
